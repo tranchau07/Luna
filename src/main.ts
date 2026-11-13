@@ -65,6 +65,7 @@ async function bootstrap(): Promise<void> {
     crystalValleyBiome,
     engine.terrain.heightfield,
     rocks.obstacles,
+    engine.assets,
     engine.bus,
   );
   const particles = new ParticleSystem(

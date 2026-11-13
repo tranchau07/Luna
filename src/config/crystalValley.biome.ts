@@ -136,8 +136,8 @@ export const crystalValleyBiome: BiomeConfig = {
     {
       id: 'stone-bridge',
       label: 'Bridge',
-      position: [-14, 4.2, 18],
-      target: [1.5, 1.2, 6],
+      position: [7.5, 5.2, 14.5],
+      target: [0.0, 1.5, 5.5],
     },
     {
       id: 'koi-pond',
@@ -148,7 +148,7 @@ export const crystalValleyBiome: BiomeConfig = {
     {
       id: 'campsite',
       label: 'Campsite',
-      position: [22, 4.4, 15],
+      position: [22, 5.2, 15],
       target: [12, 1.4, 5],
     },
   ],

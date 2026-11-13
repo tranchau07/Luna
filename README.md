@@ -24,3 +24,13 @@ npm run smoke      # Headless Chromium WebGL smoke & VRAM leak verification
 
 ## Real-GPU 60 FPS Profiling
 Headless cloud verification uses Chromium SwiftShader software rendering to validate console cleanliness, shader compilation, interactions, screenshots, and `dispose()` memory cleanup. To verify 60 FPS hardware performance, run `npm run dev` on a GPU-equipped machine and inspect the `stats-gl` overlay in Chrome DevTools.
+
+## Docker
+```bash
+# Production build served via Nginx (http://localhost:8080)
+docker compose up -d --build
+
+# Development server with HMR, lil-gui & stats-gl (http://localhost:5173)
+docker compose --profile dev up --build
+```
+

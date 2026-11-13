@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import * as YUKA from 'yuka';
 import type { IWorldSystem } from '../core/IWorldSystem';
+import type { AssetLoader } from '../core/AssetLoader';
 import type { EventBus } from '../core/EventBus';
 import type { BiomeConfig } from '../config/BiomeConfig';
 import type { TerrainHeightfield } from '../world/TerrainHeightfield';
@@ -25,11 +26,12 @@ export class AIManager implements IWorldSystem {
     biome: BiomeConfig,
     heightfield: TerrainHeightfield,
     obstacles: RockObstacle[],
+    assets: AssetLoader,
     bus: EventBus,
   ) {
     this.bus = bus;
-    this.fishFlock = new FishFlockAI(scene, biome, this.entityManager, obstacles);
-    this.wildlife = new WildlifeFSM(scene, biome, heightfield, this.entityManager);
+    this.fishFlock = new FishFlockAI(scene, biome, this.entityManager, obstacles, assets);
+    this.wildlife = new WildlifeFSM(scene, biome, heightfield, this.entityManager, assets);
   }
 
   init(): void {

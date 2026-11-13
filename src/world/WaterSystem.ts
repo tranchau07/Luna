@@ -10,7 +10,8 @@ const MAX_RIPPLES = 4;
 
 /**
  * Renders the crystal valley stream, koi pool, and 3-tier stepped waterfall
- * with custom GLSL Fresnel, depth-faded absorption, caustics, and interactive click ripples.
+ * with custom GLSL Fresnel, depth-faded absorption, Voronoi cellular caustics,
+ * organic FBM shoreline foam, and interactive click ripples.
  */
 export class WaterSystem implements IWorldSystem {
   readonly name = 'WaterSystem';
@@ -86,7 +87,7 @@ export class WaterSystem implements IWorldSystem {
     geo.setAttribute('aDepth', new THREE.BufferAttribute(depths, 1));
     geo.computeBoundsTree();
 
-    const waterNormal = this.assets.getProceduralNormalMap('water-ripples', 256, 4, 0.42, 5);
+    const waterNormal = this.assets.getProceduralNormalMap('water-ripples', 256, 4, 0.35, 5);
     const { shallowColor, deepColor, foamColor, causticIntensity, flowSpeed, waveAmplitude } =
       this.biome.water;
 
@@ -94,13 +95,13 @@ export class WaterSystem implements IWorldSystem {
       baseMaterial: THREE.MeshPhysicalMaterial,
       transparent: true,
       depthWrite: false,
-      roughness: 0.18,
+      roughness: 0.14,
       metalness: 0.02,
       ior: 1.333,
       reflectivity: 0.6,
       envMapIntensity: 0.45,
       normalMap: waterNormal,
-      normalScale: new THREE.Vector2(0.14, 0.14),
+      normalScale: new THREE.Vector2(0.08, 0.08),
       uniforms: {
         uTime: { value: 0 },
         uFlowSpeed: { value: flowSpeed },
@@ -124,17 +125,18 @@ export class WaterSystem implements IWorldSystem {
           vDepth = aDepth;
           vec3 p = position;
           float waveMask = smoothstep(0.0, 0.45, aDepth);
-          float wave = sin(p.x * 1.1 + uTime * 1.8) * cos(p.z * 0.9 - uTime * 1.4 * uFlowSpeed);
+          float w1 = sin(p.x * 0.9 + p.z * 0.35 + uTime * 1.7) * cos(p.z * 0.85 - p.x * 0.25 - uTime * 1.4 * uFlowSpeed);
+          float w2 = sin((p.x * 1.7 - p.z * 1.3) - uTime * 2.2) * 0.32;
           float rippleSum = 0.0;
           for (int i = 0; i < 4; i++) {
             float age = uTime - uRipples[i].z;
             if (age > 0.0 && age < 4.5) {
               float dist = distance(p.xz, uRipples[i].xy);
-              float ring = sin((dist - age * 3.8) * 5.0) * exp(-dist * 0.35) * exp(-age * 0.9);
-              rippleSum += ring * 0.05 * uRipples[i].w;
+              float ring = sin((dist - age * 3.8) * 5.2) * exp(-dist * 0.35) * exp(-age * 0.9);
+              rippleSum += ring * 0.055 * uRipples[i].w;
             }
           }
-          p.y += (wave * uWaveAmp + rippleSum) * waveMask;
+          p.y += ((w1 + w2) * uWaveAmp * 0.8 + rippleSum) * waveMask;
           csm_Position = p;
           vWaterWorldPos = (modelMatrix * vec4(p, 1.0)).xyz;
         }
@@ -150,29 +152,81 @@ export class WaterSystem implements IWorldSystem {
         varying float vDepth;
         varying vec3 vWaterWorldPos;
 
-        float causticPattern(vec2 uv, float t) {
-          vec2 p = uv * 0.85;
-          float c1 = sin(p.x * 2.4 + t * 1.2 + sin(p.y * 2.1 - t * 0.8));
-          float c2 = sin(p.y * 2.7 - t * 1.0 + cos(p.x * 1.9 + t * 0.7));
-          return pow(max(0.0, 1.0 - abs(c1 + c2) * 0.55), 3.0);
+        vec2 hash22(vec2 p) {
+          p = vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3)));
+          return fract(sin(p) * 43758.5453);
+        }
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(127.1, 311.7));
+          p += dot(p, p + 34.23);
+          return fract(p.x * p.y);
+        }
+
+        float noise2(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+            mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+
+        // True cellular Voronoi caustics (organic web filaments, zero parallel grid lines)
+        float voronoiCaustic(vec2 uv, float t) {
+          vec2 n = floor(uv);
+          vec2 f = fract(uv);
+          float md1 = 8.0;
+          float md2 = 8.0;
+          for (int j = -1; j <= 1; j++) {
+            for (int i = -1; i <= 1; i++) {
+              vec2 g = vec2(float(i), float(j));
+              vec2 o = hash22(n + g);
+              o = 0.5 + 0.42 * sin(t * 0.95 + 6.2831 * o);
+              vec2 r = g + o - f;
+              float d = dot(r, r);
+              if (d < md1) {
+                md2 = md1;
+                md1 = d;
+              } else if (d < md2) {
+                md2 = d;
+              }
+            }
+          }
+          float edge = sqrt(md2) - sqrt(md1);
+          return pow(1.0 - clamp(edge * 2.2, 0.0, 1.0), 3.0);
         }
 
         void main() {
           if (vDepth < -0.02) discard;
 
           float depthT = clamp(vDepth / 1.65, 0.0, 1.0);
-          vec3 baseCol = mix(uShallowColor, uDeepColor, pow(depthT, 0.68));
+          vec3 baseCol = mix(uShallowColor, uDeepColor, pow(depthT, 0.65));
 
-          // Animated bottom caustics visible in clear shallow water
-          vec2 flowUv = vWaterWorldPos.xz - vec2(0.0, uTime * uFlowSpeed * 0.65);
-          float caustics = causticPattern(flowUv, uTime) * (1.0 - depthT * 0.65);
+          // Organic Voronoi bottom caustics in clear shallow water
+          vec2 flowUv = vWaterWorldPos.xz * 0.52 - vec2(0.0, uTime * uFlowSpeed * 0.42);
+          float caustics = (voronoiCaustic(flowUv, uTime) * 0.65 +
+                            voronoiCaustic(flowUv * 1.45 + vec2(3.7, -2.1), -uTime * 0.75) * 0.45)
+            * (1.0 - depthT * 0.68);
           baseCol += uFoamColor * caustics * uCausticIntensity * 0.28;
 
-          // Subtle shoreline foam + waterfall base aeration foam
-          float shoreFoam = (1.0 - smoothstep(0.02, 0.14, vDepth)) * 0.32;
+          // Organic frothy shoreline foam (broken up by 2D noise, no parallel rings)
+          float foamNoise = noise2(vWaterWorldPos.xz * 2.6 + vec2(0.0, -uTime * 0.65)) * 0.65
+                          + noise2(vWaterWorldPos.xz * 5.8 - vec2(uTime * 0.4, 0.0)) * 0.35;
+          float shoreEdge = 1.0 - smoothstep(0.0, 0.22, vDepth);
+          float shoreFoam = smoothstep(0.45, 0.85, foamNoise + shoreEdge * 0.55) * shoreEdge * 0.52;
+
+          // Waterfall plunge pool aeration foam
           float fallDist = distance(vWaterWorldPos.xz, vec2(0.0, -24.5));
-          float plungeFoam = (1.0 - smoothstep(1.2, 4.2, fallDist)) *
-            (0.55 + 0.35 * sin(fallDist * 2.6 - uTime * 3.8));
+          float plungeMask = 1.0 - smoothstep(1.2, 5.2, fallDist);
+          float plungeFoam = plungeMask * smoothstep(0.28, 0.78, foamNoise + plungeMask * 0.45) * 0.72;
+
+          // Stepping-stone ford wake foam near z = 16.5
+          float fordDist = abs(vWaterWorldPos.z - 16.5);
+          float fordMask = (1.0 - smoothstep(0.2, 1.4, fordDist)) * (1.0 - smoothstep(0.05, 0.45, vDepth));
+          float fordWake = fordMask * smoothstep(0.42, 0.82, foamNoise) * 0.45;
 
           // Interactive click wave rings
           float clickRing = 0.0;
@@ -185,15 +239,15 @@ export class WaterSystem implements IWorldSystem {
             }
           }
 
-          float foam = clamp(shoreFoam + plungeFoam * 0.62 + clickRing * 0.8, 0.0, 1.0);
+          float foam = clamp(shoreFoam + plungeFoam + fordWake + clickRing * 0.85, 0.0, 1.0);
           vec3 finalCol = mix(baseCol, uFoamColor, foam);
 
-          // Fresnel boost at grazing view angles
+          // Subtle Fresnel sky reflection at grazing view angles
           vec3 viewDir = normalize(cameraPosition - vWaterWorldPos);
           float fresnel = pow(1.0 - clamp(dot(viewDir, vec3(0.0, 1.0, 0.0)), 0.0, 1.0), 3.6);
-          finalCol = mix(finalCol, uFoamColor * 0.82, fresnel * 0.22);
+          finalCol = mix(finalCol, uFoamColor * 0.85, fresnel * 0.24);
 
-          float alpha = clamp(smoothstep(-0.02, 0.12, vDepth) * (0.48 + depthT * 0.3 + foam * 0.35), 0.0, 0.88);
+          float alpha = clamp(smoothstep(-0.02, 0.12, vDepth) * (0.44 + depthT * 0.34 + foam * 0.38), 0.0, 0.88);
           csm_DiffuseColor = vec4(finalCol, alpha);
         }
       `,
@@ -201,7 +255,8 @@ export class WaterSystem implements IWorldSystem {
 
     const mesh = new THREE.Mesh(geo, material);
     mesh.name = 'crystal-stream-water';
-    mesh.receiveShadow = true;
+    // Prevent directional shadow-map acne stripes across the translucent water plane
+    mesh.receiveShadow = false;
     mesh.renderOrder = 2;
     mesh.userData = { interactableType: 'water' };
 
@@ -231,7 +286,9 @@ export class WaterSystem implements IWorldSystem {
         void main() {
           vUv = uv;
           vec3 p = position;
-          p.z += sin(uv.y * 10.0 + uTime * 6.0) * 0.08 * (1.0 - uv.y);
+          float crestArch = sin(uv.y * 3.14159) * 0.24;
+          float curtainWave = sin(uv.y * 12.0 + uTime * 6.8 + uv.x * 5.0) * 0.08 * (1.0 - uv.y);
+          p.z += crestArch + curtainWave;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(p, 1.0);
         }
       `,
@@ -241,27 +298,33 @@ export class WaterSystem implements IWorldSystem {
         uniform vec3 uWaterColor;
         uniform vec3 uFoamColor;
         void main() {
-          float flow = vUv.y * 5.0 + uTime * 2.4;
-          float streaks = sin(vUv.x * 26.0 + sin(flow * 1.3)) * 0.5 + 0.5;
-          float foamBand = smoothstep(0.35, 0.9, streaks) * 0.65 + (1.0 - vUv.y) * 0.55;
+          float flow1 = vUv.y * 5.5 + uTime * 2.65;
+          float flow2 = vUv.y * 11.0 + uTime * 4.1;
+          float s1 = sin(vUv.x * 28.0 + sin(flow1 * 1.4)) * 0.5 + 0.5;
+          float s2 = sin(vUv.x * 54.0 - cos(flow2 * 1.2)) * 0.5 + 0.5;
+          float streaks = s1 * 0.65 + s2 * 0.35;
+
+          float crestFoam = smoothstep(0.65, 0.92, vUv.y) * 0.45;
+          float baseBoil = (1.0 - smoothstep(0.0, 0.38, vUv.y)) * 0.65;
+          float foamBand = smoothstep(0.32, 0.88, streaks) * 0.68 + crestFoam + baseBoil;
+
           float edgeX = smoothstep(0.0, 0.24, vUv.x) * (1.0 - smoothstep(0.76, 1.0, vUv.x));
-          float edgeY = smoothstep(0.0, 0.18, vUv.y) * (1.0 - smoothstep(0.78, 1.0, vUv.y));
+          float edgeY = smoothstep(0.0, 0.16, vUv.y) * (1.0 - smoothstep(0.8, 1.0, vUv.y));
           vec3 col = mix(uWaterColor, uFoamColor, clamp(foamBand, 0.0, 1.0));
-          float alpha = edgeX * edgeY * (0.55 + foamBand * 0.35);
+          float alpha = edgeX * edgeY * (0.58 + clamp(foamBand, 0.0, 1.0) * 0.36);
           gl_FragColor = vec4(col, alpha);
         }
       `,
     });
 
-    // 3 cascading waterfall tiers descending into the koi pool
     const tiers = [
-      { width: 4.4, height: 2.9, pos: new THREE.Vector3(fallX, 6.2, waterfallZ - 3.6), tilt: 0.34 },
-      { width: 5.0, height: 2.9, pos: new THREE.Vector3(fallX, 3.8, waterfallZ - 1.5), tilt: 0.36 },
-      { width: 5.6, height: 2.8, pos: new THREE.Vector3(fallX, 1.4, waterfallZ + 0.7), tilt: 0.3 },
+      { width: 4.5, height: 3.0, pos: new THREE.Vector3(fallX, 6.2, waterfallZ - 3.6), tilt: 0.34 },
+      { width: 5.1, height: 3.0, pos: new THREE.Vector3(fallX, 3.8, waterfallZ - 1.5), tilt: 0.36 },
+      { width: 5.8, height: 2.9, pos: new THREE.Vector3(fallX, 1.4, waterfallZ + 0.7), tilt: 0.3 },
     ];
 
     for (const tier of tiers) {
-      const geo = new THREE.PlaneGeometry(tier.width, tier.height, 14, 18);
+      const geo = new THREE.PlaneGeometry(tier.width, tier.height, 18, 24);
       const mesh = new THREE.Mesh(geo, this.waterfallMat);
       mesh.position.copy(tier.pos);
       mesh.rotation.x = tier.tilt;

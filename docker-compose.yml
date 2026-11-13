@@ -1,0 +1,23 @@
+services:
+  luna:
+    build:
+      context: .
+      target: prod
+    container_name: luna-3d-world
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+  luna-dev:
+    profiles: ["dev"]
+    build:
+      context: .
+      target: dev
+    container_name: luna-3d-world-dev
+    ports:
+      - "5173:5173"
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - CHOKIDAR_USEPOLLING=true

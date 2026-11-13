@@ -54,13 +54,14 @@ export class SkyAtmosphere implements IWorldSystem {
   init(): void {
     this.scene.fog = this.fog;
 
-    // Sky gradient dome
+    // Sky gradient dome with drifting FBM clouds
     const skyGeo = new THREE.SphereGeometry(260, 32, 20);
     this.skyMat = new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
       fog: false,
       uniforms: {
+        uTime: { value: 0 },
         uTopColor: { value: new THREE.Color(this.targetPreset.skyTopColor) },
         uHorizonColor: { value: new THREE.Color(this.targetPreset.skyHorizonColor) },
         uSunDir: { value: this.sunDirection.clone() },
@@ -75,16 +76,58 @@ export class SkyAtmosphere implements IWorldSystem {
         }
       `,
       fragmentShader: /* glsl */ `
+        uniform float uTime;
         uniform vec3 uTopColor;
         uniform vec3 uHorizonColor;
         uniform vec3 uSunDir;
         uniform vec3 uSunColor;
         varying vec3 vWorldDir;
+
+        float hash2(vec2 p) {
+          p = fract(p * vec2(127.1, 311.7));
+          p += dot(p, p + 19.19);
+          return fract(p.x * p.y);
+        }
+
+        float valueNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float a = hash2(i);
+          float b = hash2(i + vec2(1.0, 0.0));
+          float c = hash2(i + vec2(0.0, 1.0));
+          float d = hash2(i + vec2(1.0, 1.0));
+          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }
+
+        float fbmClouds(vec2 uv) {
+          float v = 0.0;
+          float amp = 0.52;
+          for (int i = 0; i < 4; i++) {
+            v += valueNoise(uv) * amp;
+            uv = uv * 2.07 + vec2(13.7, -9.2);
+            amp *= 0.5;
+          }
+          return v;
+        }
+
         void main() {
-          float h = clamp(vWorldDir.y, 0.0, 1.0);
+          vec3 dir = normalize(vWorldDir);
+          float h = clamp(dir.y, 0.0, 1.0);
           vec3 col = mix(uHorizonColor, uTopColor, pow(h, 0.58));
-          float sunAmt = max(dot(normalize(vWorldDir), normalize(uSunDir)), 0.0);
-          col += uSunColor * pow(sunAmt, 14.0) * 0.45;
+
+          float sunAmt = max(dot(dir, normalize(uSunDir)), 0.0);
+          col += uSunColor * pow(sunAmt, 12.0) * 0.42;
+
+          // Project upper sky hemisphere onto drifting cloud plane
+          if (h > 0.04) {
+            vec2 cloudUv = dir.xz / (h + 0.22) * 2.2 + vec2(uTime * 0.015, -uTime * 0.008);
+            float n = fbmClouds(cloudUv);
+            float cloudMask = smoothstep(0.47, 0.78, n) * smoothstep(0.04, 0.26, h);
+            vec3 cloudCol = mix(uHorizonColor * 1.12, uSunColor * 1.15, 0.35 + 0.55 * pow(sunAmt, 3.0));
+            col = mix(col, cloudCol, cloudMask * 0.56);
+          }
+
           col += uSunColor * pow(sunAmt, 180.0) * 1.1;
           gl_FragColor = vec4(col, 1.0);
         }
@@ -136,14 +179,15 @@ export class SkyAtmosphere implements IWorldSystem {
     this.sunLight.castShadow = true;
     this.sunLight.shadow.mapSize.set(2048, 2048);
     this.sunLight.shadow.camera.near = 5;
-    this.sunLight.shadow.camera.far = 175;
-    const d = 48;
+    this.sunLight.shadow.camera.far = 165;
+    const d = 38;
     this.sunLight.shadow.camera.left = -d;
     this.sunLight.shadow.camera.right = d;
     this.sunLight.shadow.camera.top = d;
     this.sunLight.shadow.camera.bottom = -d;
-    this.sunLight.shadow.bias = -0.0012;
-    this.sunLight.shadow.normalBias = 0.065;
+    this.sunLight.shadow.bias = -0.0004;
+    this.sunLight.shadow.normalBias = 0.14;
+    this.sunLight.shadow.radius = 2.4;
     this.scene.add(this.sunLight);
     this.scene.add(this.sunLight.target);
     this.sunLight.target.position.set(0, 0, -6);
@@ -255,6 +299,9 @@ export class SkyAtmosphere implements IWorldSystem {
   }
 
   update(_dt: number, elapsed: number): void {
+    if (this.skyMat) {
+      this.skyMat.uniforms.uTime.value = elapsed;
+    }
     if (this.starsPoints && this.currentMode === 'moonlight') {
       this.starsPoints.rotation.y = elapsed * 0.004;
     }

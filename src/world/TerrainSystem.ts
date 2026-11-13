@@ -7,7 +7,7 @@ import { TerrainHeightfield } from './TerrainHeightfield';
 
 /**
  * Generates high-resolution terrain geometry with vertex AO, BVH acceleration,
- * and CSM shader blending for wet riverbeds, moss, turf, and exposed cliff rock.
+ * and smooth non-periodic FBM shader blending for riverbeds, lush moss, meadow turf, and cliff rock.
  */
 export class TerrainSystem implements IWorldSystem {
   readonly name = 'TerrainSystem';
@@ -36,11 +36,11 @@ export class TerrainSystem implements IWorldSystem {
     const pos = geometry.attributes.position as THREE.BufferAttribute;
     const colors = new Float32Array(pos.count * 3);
 
-    const colorBed = new THREE.Color('#2c3834');
-    const colorWetBank = new THREE.Color('#3b5435');
-    const colorMoss = new THREE.Color('#3e6e2e');
-    const colorGrass = new THREE.Color('#588c3c');
-    const colorRock = new THREE.Color('#5d6269');
+    const colorBed = new THREE.Color('#283631');
+    const colorWetBank = new THREE.Color('#375234');
+    const colorMoss = new THREE.Color('#356129');
+    const colorGrass = new THREE.Color('#4c7d34');
+    const colorRock = new THREE.Color('#5a5f66');
     const tmp = new THREE.Color();
 
     for (let i = 0; i < pos.count; i++) {
@@ -68,7 +68,7 @@ export class TerrainSystem implements IWorldSystem {
           this.heightfield.getHeightAt(x, z - 1.5)) *
         0.25;
       const concavity = Math.max(0, avgNeighbor - y);
-      const ao = Math.max(0.54, 1.0 - concavity * 0.36);
+      const ao = Math.max(0.55, 1.0 - concavity * 0.35);
 
       if (y < waterLevel - 0.05) {
         tmp.copy(colorBed);
@@ -76,7 +76,7 @@ export class TerrainSystem implements IWorldSystem {
         const t = (y - (waterLevel - 0.05)) / 0.47;
         tmp.copy(colorBed).lerp(colorWetBank, t);
       } else {
-        const rockMix = Math.max(0, Math.min(1, (slope - 0.26) / 0.25));
+        const rockMix = Math.max(0, Math.min(1, (slope - 0.25) / 0.24));
         const mossMix = Math.max(0, Math.min(1, (y - 0.4) / 4.5));
         tmp.copy(colorMoss).lerp(colorGrass, mossMix * 0.8);
         tmp.lerp(colorRock, rockMix);
@@ -91,15 +91,15 @@ export class TerrainSystem implements IWorldSystem {
     geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
     geometry.computeBoundsTree();
 
-    const normalMap = this.assets.getProceduralNormalMap('terrain-soil', 256, 6, 1.2, 14);
+    const normalMap = this.assets.getProceduralNormalMap('terrain-soil', 256, 5, 0.85, 12);
 
     const material = new CustomShaderMaterial({
       baseMaterial: THREE.MeshStandardMaterial,
       vertexColors: true,
       normalMap,
-      normalScale: new THREE.Vector2(0.55, 0.55),
+      normalScale: new THREE.Vector2(0.32, 0.32),
       roughness: 0.9,
-      metalness: 0.02,
+      metalness: 0.01,
       uniforms: {
         uWaterLevel: { value: waterLevel },
       },
@@ -123,16 +123,63 @@ export class TerrainSystem implements IWorldSystem {
         varying vec3 vTerrainWorldPos;
         varying vec3 vTerrainWorldNormal;
         varying vec3 vTerrainColor;
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(127.1, 311.7));
+          p += dot(p, p + 34.23);
+          return fract(p.x * p.y);
+        }
+
+        float valueNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float a = hash21(i);
+          float b = hash21(i + vec2(1.0, 0.0));
+          float c = hash21(i + vec2(0.0, 1.0));
+          float d = hash21(i + vec2(1.0, 1.0));
+          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }
+
+        float fbm2(vec2 p) {
+          float v = 0.0;
+          float amp = 0.5;
+          mat2 rot = mat2(0.8, -0.6, 0.6, 0.8);
+          for (int i = 0; i < 4; i++) {
+            v += valueNoise(p) * amp;
+            p = rot * p * 2.05 + vec2(11.3, 7.1);
+            amp *= 0.5;
+          }
+          return v;
+        }
+
         void main() {
           vec3 col = vTerrainColor;
-          // Darken & gloss wet shoreline band near the stream & pool
-          float shore = 1.0 - smoothstep(uWaterLevel - 0.2, uWaterLevel + 0.45, vTerrainWorldPos.y);
-          col *= mix(1.0, 0.58, shore);
-          csm_Roughness = mix(csm_Roughness, 0.22, shore * 0.85);
+          float slope = 1.0 - clamp(vTerrainWorldNormal.y, 0.0, 1.0);
 
-          // Subtle moss accent on upward-facing valley surfaces
-          float up = smoothstep(0.68, 0.92, vTerrainWorldNormal.y);
-          col = mix(col, col * vec3(0.92, 1.12, 0.86), up * 0.4);
+          // 1. Organic non-periodic rocky grain on steep cliff walls (no horizontal stripes)
+          float cliffMask = smoothstep(0.26, 0.54, slope);
+          float rockNoise = fbm2(vTerrainWorldPos.xy * 0.45 + vTerrainWorldPos.zy * 0.35);
+          float microGrit = valueNoise(vTerrainWorldPos.xz * 2.4 + vTerrainWorldPos.y * 1.8);
+          vec3 cliffTint = col * (0.78 + 0.36 * rockNoise) * (0.88 + 0.22 * microGrit);
+          col = mix(col, cliffTint, cliffMask * 0.78);
+
+          // 2. Smooth organic meadow & moss mottling via rotated FBM (zero grid lines)
+          float organicPatch = fbm2(vTerrainWorldPos.xz * 0.22);
+          float fineTurf = valueNoise(vTerrainWorldPos.xz * 1.65);
+          float up = smoothstep(0.64, 0.94, vTerrainWorldNormal.y);
+          vec3 meadowTint = col * mix(vec3(0.84, 0.94, 0.80), vec3(0.96, 1.14, 0.86), organicPatch);
+          meadowTint *= (0.92 + 0.16 * fineTurf);
+          col = mix(col, meadowTint, up * 0.62);
+
+          // 3. Smooth organic riverbed gravel & wet shoreline sheen
+          float shore = 1.0 - smoothstep(uWaterLevel - 0.35, uWaterLevel + 0.5, vTerrainWorldPos.y);
+          float bedSilt = fbm2(vTerrainWorldPos.xz * 1.15);
+          col = mix(col, col * (0.76 + 0.44 * bedSilt), shore * 0.58);
+          col *= mix(1.0, 0.58, shore);
+
+          csm_Roughness = mix(csm_Roughness, 0.78, cliffMask * 0.45);
+          csm_Roughness = mix(csm_Roughness, 0.2, shore * 0.85);
           csm_DiffuseColor.rgb = col;
         }
       `,

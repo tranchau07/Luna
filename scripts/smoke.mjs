@@ -91,11 +91,17 @@ async function main() {
     await page.evaluate(() => window.__LUNA_DEBUG__.setCameraPreset('waterfall-sanctuary', false));
     await captureStable(page, '02-waterfall.png');
 
+    await page.evaluate(() => window.__LUNA_DEBUG__.setCameraPreset('stone-bridge', false));
+    await captureStable(page, '03-bridge.png');
+
+    await page.evaluate(() => window.__LUNA_DEBUG__.setCameraPreset('campsite', false));
+    await captureStable(page, '04-campsite.png');
+
     await page.evaluate(() => {
       window.__LUNA_DEBUG__.setCameraPreset('valley-overview', false);
       window.__LUNA_DEBUG__.setWeather('moonlight');
     });
-    await captureStable(page, '03-moonlight.png');
+    await captureStable(page, '05-moonlight.png');
 
     // Exercise quality tiers, Eco Mode, and click interaction
     await page.evaluate(() => {
@@ -130,7 +136,11 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(err);
-  process.exit(1);
-});
+main()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

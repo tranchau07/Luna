@@ -1,10 +1,16 @@
 import * as THREE from 'three';
 import * as YUKA from 'yuka';
 import Alea from 'alea';
+import type { AssetLoader } from '../core/AssetLoader';
 import type { BiomeConfig } from '../config/BiomeConfig';
 import type { TerrainHeightfield } from '../world/TerrainHeightfield';
 
 type DeerStateId = 'graze' | 'stroll' | 'drink';
+
+export interface DeerLegRig {
+  upperGroup: THREE.Group;
+  lowerGroup: THREE.Group;
+}
 
 export class DeerAgent extends YUKA.Vehicle {
   readonly id: string;
@@ -13,7 +19,10 @@ export class DeerAgent extends YUKA.Vehicle {
   currentState: DeerStateId = 'graze';
   readonly root: THREE.Group;
   readonly neckGroup: THREE.Group;
-  readonly legs: THREE.Mesh[];
+  readonly earLeft: THREE.Mesh;
+  readonly earRight: THREE.Mesh;
+  readonly tailMesh: THREE.Mesh;
+  readonly legs: DeerLegRig[];
   readonly wander: YUKA.WanderBehavior;
   readonly arrive: YUKA.ArriveBehavior;
   readonly phase: number;
@@ -23,7 +32,10 @@ export class DeerAgent extends YUKA.Vehicle {
     id: string;
     root: THREE.Group;
     neckGroup: THREE.Group;
-    legs: THREE.Mesh[];
+    earLeft: THREE.Mesh;
+    earRight: THREE.Mesh;
+    tailMesh: THREE.Mesh;
+    legs: DeerLegRig[];
     wander: YUKA.WanderBehavior;
     arrive: YUKA.ArriveBehavior;
     phase: number;
@@ -33,6 +45,9 @@ export class DeerAgent extends YUKA.Vehicle {
     this.id = params.id;
     this.root = params.root;
     this.neckGroup = params.neckGroup;
+    this.earLeft = params.earLeft;
+    this.earRight = params.earRight;
+    this.tailMesh = params.tailMesh;
     this.legs = params.legs;
     this.wander = params.wander;
     this.arrive = params.arrive;
@@ -84,7 +99,6 @@ class DeerDrinkState extends YUKA.State<DeerAgent> {
     owner.stateTimer = 6.5;
     owner.wander.active = false;
     owner.arrive.active = true;
-    // Head towards eastern sandy shore of the koi pool
     owner.arrive.target.set(8.5, 0.35, -7.5 + (Math.random() - 0.5) * 3.0);
   }
   execute(owner: DeerAgent): void {
@@ -99,8 +113,8 @@ class DeerDrinkState extends YUKA.State<DeerAgent> {
 
 interface SkyGlider {
   root: THREE.Group;
-  wingL: THREE.Mesh;
-  wingR: THREE.Mesh;
+  wingL: THREE.Object3D;
+  wingR: THREE.Object3D;
   vehicle: YUKA.Vehicle;
   orbitRadius: number;
   baseHeight: number;
@@ -108,8 +122,8 @@ interface SkyGlider {
 }
 
 /**
- * Manages Sika Deer using Yuka StateMachine (Graze / Stroll / Drink),
- * plus gliding valley birds and meadow butterflies.
+ * Manages anatomically detailed Sika Deer using Yuka StateMachine (Graze / Stroll / Drink),
+ * plus feathered valley birds and swallowtail meadow butterflies.
  */
 export class WildlifeFSM {
   readonly deerAgents: DeerAgent[] = [];
@@ -119,6 +133,7 @@ export class WildlifeFSM {
   private readonly biome: BiomeConfig;
   private readonly heightfield: TerrainHeightfield;
   private readonly entityManager: YUKA.EntityManager;
+  private readonly assets: AssetLoader;
 
   private birds: SkyGlider[] = [];
   private butterflies: SkyGlider[] = [];
@@ -134,11 +149,13 @@ export class WildlifeFSM {
     biome: BiomeConfig,
     heightfield: TerrainHeightfield,
     entityManager: YUKA.EntityManager,
+    assets: AssetLoader,
   ) {
     this.scene = scene;
     this.biome = biome;
     this.heightfield = heightfield;
     this.entityManager = entityManager;
+    this.assets = assets;
   }
 
   init(): void {
@@ -147,25 +164,60 @@ export class WildlifeFSM {
     this.buildButterflies();
   }
 
+  private trackGeo<T extends THREE.BufferGeometry>(geo: T): T {
+    this.geometries.push(geo);
+    return geo;
+  }
+
   private buildDeer(): void {
     const prng = Alea(`${this.biome.seed}-deer`);
 
-    const torsoGeo = new THREE.CapsuleGeometry(0.28, 0.72, 6, 10);
+    // Sculpted anatomical torso, chest, rump, neck, head, snout, ears, 2-joint legs, hooves, and branched antlers
+    const torsoGeo = this.trackGeo(new THREE.CapsuleGeometry(0.25, 0.72, 8, 12));
     torsoGeo.rotateX(Math.PI / 2);
-    const neckGeo = new THREE.CylinderGeometry(0.11, 0.15, 0.52, 8);
-    neckGeo.translate(0, 0.24, 0);
-    const headGeo = new THREE.BoxGeometry(0.2, 0.2, 0.34);
-    const legGeo = new THREE.CylinderGeometry(0.055, 0.04, 0.65, 6);
-    legGeo.translate(0, -0.32, 0);
-    const antlerGeo = new THREE.CylinderGeometry(0.015, 0.025, 0.35, 5);
-    const spotGeo = new THREE.SphereGeometry(0.05, 6, 4);
+    const chestGeo = this.trackGeo(new THREE.SphereGeometry(0.27, 10, 8));
+    chestGeo.scale(0.92, 1.08, 1.15);
+    const rumpGeo = this.trackGeo(new THREE.SphereGeometry(0.26, 10, 8));
+    rumpGeo.scale(0.94, 1.05, 1.1);
+    const bellyGeo = this.trackGeo(new THREE.CapsuleGeometry(0.21, 0.66, 6, 8));
+    bellyGeo.rotateX(Math.PI / 2);
 
-    const coatMat = new THREE.MeshStandardMaterial({ color: '#9c663a', roughness: 0.8 });
-    const creamMat = new THREE.MeshStandardMaterial({ color: '#eadbc3', roughness: 0.85 });
-    const antlerMat = new THREE.MeshStandardMaterial({ color: '#423326', roughness: 0.7 });
+    const neckGeo = this.trackGeo(new THREE.CylinderGeometry(0.105, 0.165, 0.56, 10));
+    neckGeo.translate(0, 0.26, 0);
 
-    this.geometries.push(torsoGeo, neckGeo, headGeo, legGeo, antlerGeo, spotGeo);
-    this.materials.push(coatMat, creamMat, antlerMat);
+    const craniumGeo = this.trackGeo(new THREE.SphereGeometry(0.135, 10, 8));
+    craniumGeo.scale(0.88, 0.92, 1.18);
+    const snoutGeo = this.trackGeo(new THREE.CylinderGeometry(0.058, 0.095, 0.24, 8));
+    snoutGeo.rotateX(Math.PI / 2);
+    const noseGeo = this.trackGeo(new THREE.SphereGeometry(0.036, 6, 6));
+    const eyeGeo = this.trackGeo(new THREE.SphereGeometry(0.024, 6, 6));
+    const earGeo = this.trackGeo(new THREE.ConeGeometry(0.048, 0.19, 6));
+    earGeo.scale(0.55, 1.0, 1.0);
+    earGeo.translate(0, 0.09, 0);
+
+    const tailGeo = this.trackGeo(new THREE.ConeGeometry(0.055, 0.22, 6));
+    tailGeo.translate(0, -0.09, 0);
+
+    const upperLegGeo = this.trackGeo(new THREE.CylinderGeometry(0.072, 0.048, 0.36, 8));
+    upperLegGeo.translate(0, -0.18, 0);
+    const lowerLegGeo = this.trackGeo(new THREE.CylinderGeometry(0.044, 0.032, 0.34, 8));
+    lowerLegGeo.translate(0, -0.17, 0);
+    const hoofGeo = this.trackGeo(new THREE.CylinderGeometry(0.036, 0.046, 0.065, 6));
+    hoofGeo.translate(0, -0.34, 0.01);
+
+    const antlerBeamGeo = this.trackGeo(new THREE.CylinderGeometry(0.012, 0.024, 0.44, 6));
+    antlerBeamGeo.translate(0, 0.22, 0);
+    const antlerTineGeo = this.trackGeo(new THREE.ConeGeometry(0.014, 0.19, 5));
+    antlerTineGeo.translate(0, 0.095, 0);
+
+    const spotGeo = this.trackGeo(new THREE.SphereGeometry(0.048, 6, 4));
+
+    const coatMat = new THREE.MeshStandardMaterial({ color: '#a46838', roughness: 0.78 });
+    const creamMat = new THREE.MeshStandardMaterial({ color: '#f2e6d0', roughness: 0.82 });
+    const antlerMat = new THREE.MeshStandardMaterial({ color: '#523e2c', roughness: 0.62 });
+    const darkMat = new THREE.MeshStandardMaterial({ color: '#1b1817', roughness: 0.22 });
+
+    this.materials.push(coatMat, creamMat, antlerMat, darkMat);
 
     const spawnZones: Array<[number, number]> = [
       [11.5, -14.0],
@@ -186,61 +238,149 @@ export class WildlifeFSM {
       const userData = { interactableType: 'wildlife', entityId: id, label: `Sika Deer #${i + 1}` };
 
       const torso = new THREE.Mesh(torsoGeo, coatMat);
-      torso.position.y = 0.78;
+      torso.position.y = 0.82;
       torso.castShadow = true;
       torso.receiveShadow = true;
       torso.userData = userData;
 
-      for (let s = 0; s < 6; s++) {
+      const chest = new THREE.Mesh(chestGeo, coatMat);
+      chest.position.set(0, 0.84, 0.32);
+      chest.castShadow = true;
+      chest.userData = userData;
+
+      const rump = new THREE.Mesh(rumpGeo, coatMat);
+      rump.position.set(0, 0.85, -0.34);
+      rump.castShadow = true;
+      rump.userData = userData;
+
+      const belly = new THREE.Mesh(bellyGeo, creamMat);
+      belly.position.set(0, 0.72, 0);
+
+      // Dappled Sika spots along both flanks
+      for (let s = 0; s < 10; s++) {
         const spot = new THREE.Mesh(spotGeo, creamMat);
+        const side = s % 2 === 0 ? 1 : -1;
+        const row = Math.floor(s / 2);
         spot.position.set(
-          (s % 2 === 0 ? 1 : -1) * 0.25,
-          0.83 + (s % 3) * 0.05,
-          -0.28 + Math.floor(s / 2) * 0.26,
+          side * (0.245 + (row % 2) * 0.015),
+          0.82 + (row % 2) * 0.07,
+          -0.32 + row * 0.16,
         );
-        spot.scale.set(0.35, 0.7, 0.85);
+        spot.scale.set(0.32, 0.68, 0.88);
         root.add(spot);
       }
 
+      // White tail tuft
+      const tailMesh = new THREE.Mesh(tailGeo, creamMat);
+      tailMesh.position.set(0, 0.94, -0.58);
+      tailMesh.rotation.x = 0.45;
+      root.add(tailMesh);
+
+      // Articulated Neck + Sculpted Head + Snout + Eyes + Ears + Branched Antlers
       const neckGroup = new THREE.Group();
-      neckGroup.position.set(0, 0.92, 0.42);
+      neckGroup.position.set(0, 0.94, 0.42);
       const neck = new THREE.Mesh(neckGeo, coatMat);
-      neck.rotation.x = 0.32;
+      neck.rotation.x = 0.28;
       neck.castShadow = true;
 
-      const head = new THREE.Mesh(headGeo, coatMat);
-      head.position.set(0, 0.48, 0.22);
-      head.castShadow = true;
-      head.userData = userData;
-      neckGroup.add(neck, head);
+      const headGroup = new THREE.Group();
+      headGroup.position.set(0, 0.52, 0.18);
 
-      if (i === 0) {
+      const cranium = new THREE.Mesh(craniumGeo, coatMat);
+      cranium.castShadow = true;
+      cranium.userData = userData;
+
+      const snout = new THREE.Mesh(snoutGeo, coatMat);
+      snout.position.set(0, -0.025, 0.17);
+      snout.castShadow = true;
+
+      const nose = new THREE.Mesh(noseGeo, darkMat);
+      nose.position.set(0, -0.015, 0.29);
+
+      for (const side of [-1, 1]) {
+        const eye = new THREE.Mesh(eyeGeo, darkMat);
+        eye.position.set(side * 0.095, 0.03, 0.06);
+        headGroup.add(eye);
+      }
+
+      const earLeft = new THREE.Mesh(earGeo, coatMat);
+      earLeft.position.set(-0.09, 0.08, -0.04);
+      earLeft.rotation.set(-0.2, 0, 0.58);
+
+      const earRight = new THREE.Mesh(earGeo, coatMat);
+      earRight.position.set(0.09, 0.08, -0.04);
+      earRight.rotation.set(-0.2, 0, -0.58);
+
+      headGroup.add(cranium, snout, nose, earLeft, earRight);
+
+      // Multi-tine branched antlers for stags (deer 0 & 1)
+      if (i < 2) {
+        const antlerScale = i === 0 ? 1.0 : 0.78;
         for (const side of [-1, 1]) {
-          const antler = new THREE.Mesh(antlerGeo, antlerMat);
-          antler.position.set(side * 0.08, 0.68, 0.14);
-          antler.rotation.z = side * -0.25;
-          neckGroup.add(antler);
+          const antlerRoot = new THREE.Group();
+          antlerRoot.position.set(side * 0.065, 0.11, -0.02);
+          antlerRoot.rotation.set(-0.28, 0, side * -0.32);
+          antlerRoot.scale.setScalar(antlerScale);
+
+          const beam = new THREE.Mesh(antlerBeamGeo, antlerMat);
+          beam.castShadow = true;
+
+          // Brow tine pointing forward
+          const browTine = new THREE.Mesh(antlerTineGeo, antlerMat);
+          browTine.position.set(0, 0.11, 0.02);
+          browTine.rotation.x = 0.85;
+
+          // Royal middle tine pointing outward/upward
+          const midTine = new THREE.Mesh(antlerTineGeo, antlerMat);
+          midTine.position.set(0, 0.25, 0);
+          midTine.rotation.z = side * -0.68;
+          midTine.rotation.x = 0.35;
+
+          // Crown fork tine at top
+          const topTine = new THREE.Mesh(antlerTineGeo, antlerMat);
+          topTine.position.set(0, 0.36, -0.01);
+          topTine.rotation.z = side * 0.42;
+          topTine.rotation.x = -0.3;
+
+          antlerRoot.add(beam, browTine, midTine, topTine);
+          headGroup.add(antlerRoot);
         }
       }
 
+      neckGroup.add(neck, headGroup);
+
+      // 4 two-jointed legs (upper thigh + lower shin + dark cloven hoof)
       const legOffsets: Array<[number, number]> = [
-        [-0.14, 0.34],
-        [0.14, 0.34],
-        [-0.14, -0.34],
-        [0.14, -0.34],
+        [-0.145, 0.34],
+        [0.145, 0.34],
+        [-0.145, -0.35],
+        [0.145, -0.35],
       ];
-      const legs: THREE.Mesh[] = legOffsets.map(([lx, lz]) => {
-        const leg = new THREE.Mesh(legGeo, coatMat);
-        leg.position.set(lx, 0.65, lz);
-        leg.castShadow = true;
-        root.add(leg);
-        return leg;
+      const legs: DeerLegRig[] = legOffsets.map(([lx, lz]) => {
+        const upperGroup = new THREE.Group();
+        upperGroup.position.set(lx, 0.7, lz);
+
+        const upperMesh = new THREE.Mesh(upperLegGeo, coatMat);
+        upperMesh.castShadow = true;
+
+        const lowerGroup = new THREE.Group();
+        lowerGroup.position.set(0, -0.34, 0);
+
+        const lowerMesh = new THREE.Mesh(lowerLegGeo, coatMat);
+        lowerMesh.castShadow = true;
+
+        const hoofMesh = new THREE.Mesh(hoofGeo, darkMat);
+
+        lowerGroup.add(lowerMesh, hoofMesh);
+        upperGroup.add(upperMesh, lowerGroup);
+        root.add(upperGroup);
+        return { upperGroup, lowerGroup };
       });
 
-      root.add(torso, neckGroup);
+      root.add(torso, chest, rump, belly, neckGroup);
       root.position.set(x, y, z);
       this.scene.add(root);
-      this.clickableMeshes.push(torso, head);
+      this.clickableMeshes.push(torso, chest, rump, cranium);
 
       const wander = new YUKA.WanderBehavior(1.2, 2.0, 1.5);
       const arrive = new YUKA.ArriveBehavior(new YUKA.Vector3(8.5, 0.3, -7.5), 1.8, 0.4);
@@ -250,6 +390,9 @@ export class WildlifeFSM {
         id,
         root,
         neckGroup,
+        earLeft,
+        earRight,
+        tailMesh,
         legs,
         wander,
         arrive,
@@ -270,25 +413,49 @@ export class WildlifeFSM {
 
   private buildBirds(): void {
     const prng = Alea(`${this.biome.seed}-birds`);
-    const bodyGeo = new THREE.ConeGeometry(0.06, 0.34, 5);
+    const bodyGeo = this.trackGeo(new THREE.CapsuleGeometry(0.048, 0.22, 5, 8));
     bodyGeo.rotateX(Math.PI / 2);
-    const wingGeo = new THREE.PlaneGeometry(0.45, 0.16);
-    wingGeo.translate(0.22, 0, 0);
-    const mat = new THREE.MeshStandardMaterial({
+    const headGeo = this.trackGeo(new THREE.SphereGeometry(0.042, 6, 6));
+    const beakGeo = this.trackGeo(new THREE.ConeGeometry(0.016, 0.08, 4));
+    beakGeo.rotateX(Math.PI / 2);
+    const tailGeo = this.trackGeo(new THREE.ConeGeometry(0.09, 0.18, 3));
+    tailGeo.rotateX(-Math.PI / 2);
+    tailGeo.scale(1.2, 0.2, 1.0);
+
+    const wingGeo = this.trackGeo(new THREE.PlaneGeometry(0.52, 0.22, 2, 1));
+    wingGeo.translate(0.26, 0, 0);
+
+    const wingTex = this.assets.getBirdWingTexture(256);
+    const bodyMat = new THREE.MeshStandardMaterial({
       color: '#f4f0e8',
-      roughness: 0.6,
+      roughness: 0.55,
+    });
+    const beakMat = new THREE.MeshStandardMaterial({
+      color: '#e09f3e',
+      roughness: 0.4,
+    });
+    const wingMat = new THREE.MeshStandardMaterial({
+      map: wingTex,
+      alphaTest: 0.25,
+      roughness: 0.55,
       side: THREE.DoubleSide,
     });
-    this.geometries.push(bodyGeo, wingGeo);
-    this.materials.push(mat);
+    this.materials.push(bodyMat, beakMat, wingMat);
 
     for (let i = 0; i < this.biome.wildlife.birdCount; i++) {
       const root = new THREE.Group();
-      const body = new THREE.Mesh(bodyGeo, mat);
-      const wingL = new THREE.Mesh(wingGeo, mat);
-      const wingR = new THREE.Mesh(wingGeo, mat);
+      const body = new THREE.Mesh(bodyGeo, bodyMat);
+      const head = new THREE.Mesh(headGeo, bodyMat);
+      head.position.set(0, 0.02, 0.14);
+      const beak = new THREE.Mesh(beakGeo, beakMat);
+      beak.position.set(0, 0.015, 0.2);
+      const tail = new THREE.Mesh(tailGeo, bodyMat);
+      tail.position.set(0, 0.01, -0.18);
+
+      const wingL = new THREE.Mesh(wingGeo, wingMat);
+      const wingR = new THREE.Mesh(wingGeo, wingMat);
       wingR.scale.x = -1;
-      root.add(body, wingL, wingR);
+      root.add(body, head, beak, tail, wingL, wingR);
 
       const vehicle = new YUKA.Vehicle();
       const r = 14 + prng() * 14;
@@ -304,23 +471,35 @@ export class WildlifeFSM {
 
   private buildButterflies(): void {
     const prng = Alea(`${this.biome.seed}-butterflies`);
-    const wingGeo = new THREE.PlaneGeometry(0.14, 0.16);
-    wingGeo.translate(0.07, 0, 0);
-    const mat = new THREE.MeshStandardMaterial({
-      color: '#f2b84b',
-      emissive: '#59360a',
-      roughness: 0.45,
-      side: THREE.DoubleSide,
+    const wingGeo = this.trackGeo(new THREE.PlaneGeometry(0.18, 0.22));
+    wingGeo.translate(0.09, 0, 0);
+    const bodyGeo = this.trackGeo(new THREE.CapsuleGeometry(0.012, 0.09, 4, 6));
+    bodyGeo.rotateX(Math.PI / 2);
+
+    const bodyMat = new THREE.MeshStandardMaterial({ color: '#1f1a1c', roughness: 0.6 });
+    const wingMats = [0, 1, 2].map((v) => {
+      const tex = this.assets.getButterflyWingTexture(v, 256);
+      const m = new THREE.MeshStandardMaterial({
+        map: tex,
+        alphaTest: 0.22,
+        emissive: '#3a2208',
+        emissiveIntensity: 0.35,
+        roughness: 0.42,
+        side: THREE.DoubleSide,
+      });
+      this.materials.push(m);
+      return m;
     });
-    this.geometries.push(wingGeo);
-    this.materials.push(mat);
+    this.materials.push(bodyMat);
 
     for (let i = 0; i < this.biome.wildlife.butterflyCount; i++) {
       const root = new THREE.Group();
+      const mat = wingMats[i % wingMats.length];
+      const thorax = new THREE.Mesh(bodyGeo, bodyMat);
       const wingL = new THREE.Mesh(wingGeo, mat);
       const wingR = new THREE.Mesh(wingGeo, mat);
       wingR.scale.x = -1;
-      root.add(wingL, wingR);
+      root.add(thorax, wingL, wingR);
 
       const vehicle = new YUKA.Vehicle();
       const cx = (prng() - 0.5) * 26;
@@ -368,12 +547,23 @@ export class WildlifeFSM {
         deer.root.quaternion.set(deer.rotation.x, deer.rotation.y, deer.rotation.z, deer.rotation.w);
       }
 
+      // 2-jointed walk cycle with knee articulation
       const speed = deer.velocity.length();
-      const stride = Math.sin(elapsed * 5.2 + deer.phase) * Math.min(0.45, speed * 0.45);
-      deer.legs[0].rotation.x = stride;
-      deer.legs[1].rotation.x = -stride;
-      deer.legs[2].rotation.x = -stride;
-      deer.legs[3].rotation.x = stride;
+      const amp = Math.min(0.46, speed * 0.48);
+      const phases = [0, Math.PI, Math.PI, 0];
+      for (let l = 0; l < 4; l++) {
+        const cyc = elapsed * 5.2 + deer.phase + phases[l];
+        const swing = Math.sin(cyc) * amp;
+        const kneeBend = Math.max(0, -Math.cos(cyc)) * amp * 1.15;
+        deer.legs[l].upperGroup.rotation.x = swing;
+        deer.legs[l].lowerGroup.rotation.x = l < 2 ? -kneeBend : kneeBend * 0.85;
+      }
+
+      // Subtle ear twitch and tail flick
+      const earTwitch = Math.sin(elapsed * 3.7 + deer.phase) * 0.12;
+      deer.earLeft.rotation.z = 0.58 + earTwitch;
+      deer.earRight.rotation.z = -0.58 - earTwitch;
+      deer.tailMesh.rotation.z = Math.sin(elapsed * 6.5 + deer.phase) * 0.18;
 
       const targetPitch = deer.currentState === 'graze' || deer.currentState === 'drink' ? 0.95 : 0.05;
       deer.neckGroup.rotation.x = THREE.MathUtils.lerp(
