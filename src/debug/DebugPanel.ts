@@ -11,6 +11,7 @@ import type { QualityTier } from '../core/QualityConfig';
 export class DebugPanel {
   private gui: GUI | null = null;
   private stats: Stats | null = null;
+  private unsubs: Array<() => void> = [];
 
   constructor(private readonly engine: Engine) {}
 
@@ -37,22 +38,22 @@ export class DebugPanel {
       exposure: this.engine.sky.getExposure(),
     };
 
-    this.gui
+    const weatherCtrl = this.gui
       .add(state, 'weather', Object.keys(this.engine.biome.weatherPresets) as WeatherMode[])
       .name('Weather')
       .onChange((mode: WeatherMode) => this.engine.bus.emit('weather:change', { mode }));
 
-    this.gui
+    const qualityCtrl = this.gui
       .add(state, 'quality', ['low', 'medium', 'high'] as QualityTier[])
       .name('Quality Tier')
       .onChange((tier: QualityTier) => this.engine.bus.emit('quality:change', { tier }));
 
-    this.gui
+    const ecoCtrl = this.gui
       .add(state, 'ecoMode')
       .name('Eco 30 FPS')
       .onChange((enabled: boolean) => this.engine.bus.emit('eco:toggle', { enabled }));
 
-    this.gui
+    const presetCtrl = this.gui
       .add(
         state,
         'preset',
@@ -61,12 +62,33 @@ export class DebugPanel {
       .name('Camera Preset')
       .onChange((presetId: string) => this.engine.bus.emit('camera:preset', { presetId }));
 
-    this.gui
+    const exposureCtrl = this.gui
       .add(state, 'exposure', 0.85, 1.3, 0.01)
       .name('Exposure')
       .onChange((val: number) => {
-        this.engine.renderer.toneMappingExposure = val;
+        this.engine.sky.setExposureOverride(val);
       });
+
+    this.unsubs.push(
+      this.engine.bus.on('weather:change', ({ mode }) => {
+        state.weather = mode;
+        state.exposure = this.engine.sky.getExposure();
+        weatherCtrl.updateDisplay();
+        exposureCtrl.updateDisplay();
+      }),
+      this.engine.bus.on('quality:change', ({ tier }) => {
+        state.quality = tier;
+        qualityCtrl.updateDisplay();
+      }),
+      this.engine.bus.on('eco:toggle', ({ enabled }) => {
+        state.ecoMode = enabled;
+        ecoCtrl.updateDisplay();
+      }),
+      this.engine.bus.on('camera:preset', ({ presetId }) => {
+        state.preset = presetId;
+        presetCtrl.updateDisplay();
+      }),
+    );
   }
 
   update(): void {
@@ -74,6 +96,8 @@ export class DebugPanel {
   }
 
   dispose(): void {
+    for (const unsub of this.unsubs) unsub();
+    this.unsubs = [];
     if (this.gui) {
       this.gui.destroy();
       this.gui = null;

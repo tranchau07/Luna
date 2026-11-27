@@ -1,9 +1,12 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import type { IWorldSystem } from '../core/IWorldSystem';
 import type { EventBus, WeatherMode } from '../core/EventBus';
 import type { AssetLoader } from '../core/AssetLoader';
 import type { BiomeConfig } from '../config/BiomeConfig';
+import type { QualityProfile, QualityTier } from '../core/QualityConfig';
 import type { TerrainHeightfield } from './TerrainHeightfield';
+import type { RockObstacle } from './RockSystem';
 
 interface LanternEntity {
   id: number;
@@ -15,13 +18,15 @@ interface LanternEntity {
 }
 
 /**
- * Constructs handcrafted architectural accents: arched ancient stone bridge with balusters & handrails,
- * river stepping stones, hollow-chamber Stone Lanterns (Thach Dang) with flickering flames,
+ * Constructs handcrafted architectural accents with merged static geometries & instanced stones:
+ * arched ancient stone bridge with balusters & handrails, instanced river stepping stones,
+ * hollow-chamber Stone Lanterns (Thach Dang) with flickering flames,
  * and a detailed riverside campsite with ridgepole tent, split firewood, and cooking tripod.
  */
 export class ArchitectureSystem implements IWorldSystem {
   readonly name = 'ArchitectureSystem';
   readonly interactiveLanterns: THREE.Object3D[] = [];
+  readonly obstacles: RockObstacle[] = [];
 
   private readonly scene: THREE.Scene;
   private readonly biome: BiomeConfig;
@@ -31,11 +36,14 @@ export class ArchitectureSystem implements IWorldSystem {
 
   private root = new THREE.Group();
   private geometries: THREE.BufferGeometry[] = [];
+  private bvhGeometries: THREE.BufferGeometry[] = [];
+  private instancedMeshes: THREE.InstancedMesh[] = [];
   private materials: THREE.Material[] = [];
   private lanterns: LanternEntity[] = [];
   private campfireLight: THREE.PointLight | null = null;
   private emberMat: THREE.MeshStandardMaterial | null = null;
   private flameMeshes: THREE.Mesh[] = [];
+  private currentQuality: QualityTier = 'medium';
 
   private unsubLantern: (() => void) | null = null;
   private unsubWeather: (() => void) | null = null;
@@ -129,8 +137,13 @@ export class ArchitectureSystem implements IWorldSystem {
 
     this.unsubLantern = this.bus.on('lantern:toggle', ({ id, lit }) => {
       const target = this.lanterns.find((l) => l.id === id);
-      if (target) {
-        this.setLanternState(target, lit);
+      if (!target) return;
+      const nextLit = lit ?? !target.lit;
+      this.setLanternState(target, nextLit);
+      if (lit === undefined) {
+        this.bus.emit('ui:toast', {
+          message: nextLit ? 'Stone lantern lit' : 'Stone lantern extinguished',
+        });
       }
     });
 
@@ -139,27 +152,94 @@ export class ArchitectureSystem implements IWorldSystem {
     });
   }
 
+  applyQuality(profile: QualityProfile): void {
+    this.currentQuality = profile.tier;
+    for (const l of this.lanterns) {
+      l.light.visible = l.lit && this.currentQuality !== 'low';
+    }
+  }
+
   private trackGeo<T extends THREE.BufferGeometry>(geo: T): T {
     this.geometries.push(geo);
     return geo;
+  }
+
+  private bakePart(base: THREE.BufferGeometry, matrix: THREE.Matrix4): THREE.BufferGeometry {
+    const g = base.index ? base.toNonIndexed() : base.clone();
+    g.applyMatrix4(matrix);
+    for (const key of Object.keys(g.attributes)) {
+      if (key !== 'position' && key !== 'normal' && key !== 'uv') {
+        g.deleteAttribute(key);
+      }
+    }
+    if (!g.attributes.normal) {
+      g.computeVertexNormals();
+    }
+    if (!g.attributes.uv) {
+      g.setAttribute(
+        'uv',
+        new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2),
+      );
+    }
+    return g;
+  }
+
+  private mergeBucket(
+    parts: THREE.BufferGeometry[],
+    mat: THREE.Material,
+    name: string,
+    castShadow = true,
+    receiveShadow = true,
+  ): void {
+    if (parts.length === 0) return;
+    const merged = mergeGeometries(parts, false);
+    for (const p of parts) p.dispose();
+    if (!merged) return;
+    merged.computeBoundingSphere();
+    this.trackGeo(merged);
+    const mesh = new THREE.Mesh(merged, mat);
+    mesh.name = name;
+    mesh.castShadow = castShadow;
+    mesh.receiveShadow = receiveShadow;
+    this.root.add(mesh);
   }
 
   private buildArchedStoneBridge(
     stoneMat: THREE.Material,
     mossyStoneMat: THREE.Material,
   ): void {
-    const bridgeZ = 6.0;
+    const bridgeZ = this.biome.landmarks.bridgeZ;
     const centerX = this.heightfield.getStreamCenterX(bridgeZ);
-    const bridge = new THREE.Group();
-    bridge.position.set(centerX, 0.25, bridgeZ);
+    const bridgeOrigin = new THREE.Matrix4().makeTranslation(centerX, 0.25, bridgeZ);
 
-    const slabGeo = this.trackGeo(new THREE.BoxGeometry(0.68, 0.24, 2.65));
-    const curbGeo = this.trackGeo(new THREE.BoxGeometry(0.76, 0.34, 0.26));
-    const postBaseGeo = this.trackGeo(new THREE.BoxGeometry(0.32, 0.22, 0.32));
-    const postShaftGeo = this.trackGeo(new THREE.BoxGeometry(0.22, 0.78, 0.22));
-    const postCapGeo = this.trackGeo(new THREE.ConeGeometry(0.22, 0.2, 4));
+    const slabGeo = new THREE.BoxGeometry(0.68, 0.24, 2.65);
+    const curbGeo = new THREE.BoxGeometry(0.76, 0.34, 0.26);
+    const postBaseGeo = new THREE.BoxGeometry(0.32, 0.22, 0.32);
+    const postShaftGeo = new THREE.BoxGeometry(0.22, 0.78, 0.22);
+    const postCapGeo = new THREE.ConeGeometry(0.22, 0.2, 4);
     postCapGeo.rotateY(Math.PI / 4);
-    const railSegGeo = this.trackGeo(new THREE.BoxGeometry(0.82, 0.12, 0.14));
+    const railSegGeo = new THREE.BoxGeometry(0.82, 0.12, 0.14);
+
+    const stoneParts: THREE.BufferGeometry[] = [];
+    const mossyParts: THREE.BufferGeometry[] = [];
+    const dummy = new THREE.Object3D();
+    const worldMat = new THREE.Matrix4();
+
+    const pushLocal = (
+      geo: THREE.BufferGeometry,
+      bucket: THREE.BufferGeometry[],
+      px: number,
+      py: number,
+      pz: number,
+      rz = 0,
+    ) => {
+      dummy.position.set(px, py, pz);
+      dummy.rotation.set(0, 0, rz);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      worldMat.multiplyMatrices(bridgeOrigin, dummy.matrix);
+      bucket.push(this.bakePart(geo, worldMat));
+    };
 
     const steps = 17;
     const span = 11.2;
@@ -171,111 +251,110 @@ export class ArchitectureSystem implements IWorldSystem {
       const slopeAngle = Math.cos(t * Math.PI) * 0.34;
 
       // Deck slab
-      const step = new THREE.Mesh(slabGeo, i % 3 === 0 ? mossyStoneMat : stoneMat);
-      step.position.set(x, archY, 0);
-      step.rotation.z = slopeAngle;
-      step.castShadow = true;
-      step.receiveShadow = true;
-      bridge.add(step);
+      pushLocal(slabGeo, i % 3 === 0 ? mossyParts : stoneParts, x, archY, 0, slopeAngle);
 
       // Twin arched stone side curbs & continuous handrail segments
       for (const zSide of [-1.26, 1.26]) {
-        const curb = new THREE.Mesh(curbGeo, mossyStoneMat);
-        curb.position.set(x, archY + 0.06, zSide);
-        curb.rotation.z = slopeAngle;
-        curb.castShadow = true;
-        curb.receiveShadow = true;
-        bridge.add(curb);
+        pushLocal(curbGeo, mossyParts, x, archY + 0.06, zSide, slopeAngle);
 
         if (i < steps - 1) {
-          const rail = new THREE.Mesh(railSegGeo, stoneMat);
-          rail.position.set(x + (span / (steps - 1)) * 0.5, archY + 0.72, zSide);
-          rail.rotation.z = slopeAngle * 0.92;
-          rail.castShadow = true;
-          bridge.add(rail);
+          pushLocal(
+            railSegGeo,
+            stoneParts,
+            x + (span / (steps - 1)) * 0.5,
+            archY + 0.72,
+            zSide,
+            slopeAngle * 0.92,
+          );
         }
       }
 
       // Carved baluster posts with capstones every 4 steps
       if (i % 4 === 0) {
         for (const zSide of [-1.26, 1.26]) {
-          const postGroup = new THREE.Group();
-          postGroup.position.set(x, archY + 0.12, zSide);
-
-          const pBase = new THREE.Mesh(postBaseGeo, mossyStoneMat);
-          pBase.position.y = 0.11;
-          const pShaft = new THREE.Mesh(postShaftGeo, stoneMat);
-          pShaft.position.y = 0.52;
-          pShaft.castShadow = true;
-          const pCap = new THREE.Mesh(postCapGeo, mossyStoneMat);
-          pCap.position.y = 0.98;
-          pCap.castShadow = true;
-
-          postGroup.add(pBase, pShaft, pCap);
-          bridge.add(postGroup);
+          pushLocal(postBaseGeo, mossyParts, x, archY + 0.23, zSide);
+          pushLocal(postShaftGeo, stoneParts, x, archY + 0.64, zSide);
+          pushLocal(postCapGeo, mossyParts, x, archY + 1.1, zSide);
         }
       }
     }
-    this.root.add(bridge);
+
+    slabGeo.dispose();
+    curbGeo.dispose();
+    postBaseGeo.dispose();
+    postShaftGeo.dispose();
+    postCapGeo.dispose();
+    railSegGeo.dispose();
+
+    this.mergeBucket(stoneParts, stoneMat, 'bridge-stone');
+    this.mergeBucket(mossyParts, mossyStoneMat, 'bridge-mossy');
   }
 
   private buildSteppingStones(
     stoneMat: THREE.Material,
     mossyStoneMat: THREE.Material,
   ): void {
-    const fordZ = 16.5;
+    const fordZ = this.biome.landmarks.steppingStonesZ;
     const centerX = this.heightfield.getStreamCenterX(fordZ);
     const stoneGeo = this.trackGeo(new THREE.CylinderGeometry(0.58, 0.72, 0.34, 9));
     const mossCapGeo = this.trackGeo(new THREE.CylinderGeometry(0.42, 0.52, 0.08, 8));
+    mossCapGeo.translate(0, 0.16, 0);
     const count = 7;
 
+    const stoneInst = new THREE.InstancedMesh(stoneGeo, stoneMat, count);
+    stoneInst.name = 'stepping-stones';
+    stoneInst.castShadow = true;
+    stoneInst.receiveShadow = true;
+
+    const mossInst = new THREE.InstancedMesh(mossCapGeo, mossyStoneMat, count);
+    mossInst.name = 'stepping-stone-moss';
+    mossInst.receiveShadow = true;
+
+    const dummy = new THREE.Object3D();
     for (let i = 0; i < count; i++) {
       const t = i / (count - 1) - 0.5;
       const x = centerX + t * 5.8;
       const z = fordZ + Math.sin(i * 1.4) * 0.45;
-      const group = new THREE.Group();
-      group.position.set(x, this.biome.terrain.waterLevel + 0.04, z);
-      group.rotation.y = i * 0.7;
-      group.scale.set(1.0 + (i % 2) * 0.22, 1, 0.86);
-
-      const mesh = new THREE.Mesh(stoneGeo, stoneMat);
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-
-      const cap = new THREE.Mesh(mossCapGeo, mossyStoneMat);
-      cap.position.y = 0.16;
-      cap.receiveShadow = true;
-
-      group.add(mesh, cap);
-      this.root.add(group);
+      dummy.position.set(x, this.biome.terrain.waterLevel + 0.04, z);
+      dummy.rotation.set(0, i * 0.7, 0);
+      dummy.scale.set(1.0 + (i % 2) * 0.22, 1, 0.86);
+      dummy.updateMatrix();
+      stoneInst.setMatrixAt(i, dummy.matrix);
+      mossInst.setMatrixAt(i, dummy.matrix);
     }
+    stoneInst.instanceMatrix.needsUpdate = true;
+    mossInst.instanceMatrix.needsUpdate = true;
+    stoneInst.computeBoundingSphere();
+    mossInst.computeBoundingSphere();
+
+    this.instancedMeshes.push(stoneInst, mossInst);
+    this.root.add(stoneInst, mossInst);
   }
 
   private buildStoneLanterns(
     stoneMat: THREE.Material,
     mossyStoneMat: THREE.Material,
   ): void {
-    const spots: Array<[number, number]> = [
-      [this.heightfield.getStreamCenterX(6) - 6.0, 4.3],
-      [this.heightfield.getStreamCenterX(6) + 6.0, 7.7],
-      [7.2, -3.2],
-      [10.8, 8.8],
-    ];
+    const spots = this.biome.landmarks.lanternPositions;
 
-    // 7-part traditional Tōrō stone lantern geometries
-    const plinthGeo = this.trackGeo(new THREE.CylinderGeometry(0.44, 0.54, 0.2, 6));
-    const lotusBaseGeo = this.trackGeo(new THREE.CylinderGeometry(0.32, 0.4, 0.16, 6));
-    const shaftGeo = this.trackGeo(new THREE.CylinderGeometry(0.15, 0.19, 0.96, 8));
-    const bandGeo = this.trackGeo(new THREE.TorusGeometry(0.17, 0.032, 6, 12));
+    // 7-part traditional Toro stone lantern templates (baked into 2 merged static meshes)
+    const plinthGeo = new THREE.CylinderGeometry(0.44, 0.54, 0.2, 6);
+    const lotusBaseGeo = new THREE.CylinderGeometry(0.32, 0.4, 0.16, 6);
+    const shaftGeo = new THREE.CylinderGeometry(0.15, 0.19, 0.96, 8);
+    const bandGeo = new THREE.TorusGeometry(0.17, 0.032, 6, 12);
     bandGeo.rotateX(Math.PI / 2);
-    const platformGeo = this.trackGeo(new THREE.CylinderGeometry(0.38, 0.26, 0.16, 6));
-    const pillarGeo = this.trackGeo(new THREE.CylinderGeometry(0.032, 0.036, 0.42, 6));
-    const hitBoxGeo = this.trackGeo(new THREE.BoxGeometry(0.48, 0.46, 0.48));
-    const flameGeo = this.trackGeo(new THREE.ConeGeometry(0.085, 0.24, 8));
-    const roofGeo = this.trackGeo(new THREE.ConeGeometry(0.66, 0.36, 6));
-    const eaveRingGeo = this.trackGeo(new THREE.CylinderGeometry(0.68, 0.62, 0.06, 6));
-    const finialGeo = this.trackGeo(new THREE.SphereGeometry(0.09, 8, 6));
+    const platformGeo = new THREE.CylinderGeometry(0.38, 0.26, 0.16, 6);
+    const pillarGeo = new THREE.CylinderGeometry(0.032, 0.036, 0.42, 6);
+    const roofGeo = new THREE.ConeGeometry(0.66, 0.36, 6);
+    const eaveRingGeo = new THREE.CylinderGeometry(0.68, 0.62, 0.06, 6);
+    const finialGeo = new THREE.SphereGeometry(0.09, 8, 6);
     finialGeo.scale(0.85, 1.45, 0.85);
+
+    // Interactive / animated lantern geometries retained
+    const hitBoxGeo = this.trackGeo(new THREE.BoxGeometry(0.48, 0.46, 0.48));
+    hitBoxGeo.computeBoundsTree();
+    this.bvhGeometries.push(hitBoxGeo);
+    const flameGeo = this.trackGeo(new THREE.ConeGeometry(0.085, 0.24, 8));
 
     const hitMat = new THREE.MeshBasicMaterial({
       transparent: true,
@@ -284,41 +363,35 @@ export class ArchitectureSystem implements IWorldSystem {
     });
     this.materials.push(hitMat);
 
+    const stoneParts: THREE.BufferGeometry[] = [];
+    const mossyParts: THREE.BufferGeometry[] = [];
+    const m = new THREE.Matrix4();
+
     spots.forEach(([x, z], idx) => {
       const y = this.heightfield.getHeightAt(x, z);
-      const group = new THREE.Group();
-      group.position.set(x, y, z);
+      this.obstacles.push({ x, y: y + 1.0, z, radius: 0.9 });
 
-      const plinth = new THREE.Mesh(plinthGeo, mossyStoneMat);
-      plinth.position.y = 0.1;
-      plinth.castShadow = true;
-      plinth.receiveShadow = true;
+      const addAt = (geo: THREE.BufferGeometry, bucket: THREE.BufferGeometry[], dx: number, dy: number, dz: number) => {
+        m.makeTranslation(x + dx, y + dy, z + dz);
+        bucket.push(this.bakePart(geo, m));
+      };
 
-      const lotusBase = new THREE.Mesh(lotusBaseGeo, stoneMat);
-      lotusBase.position.y = 0.26;
-      lotusBase.castShadow = true;
+      addAt(plinthGeo, mossyParts, 0, 0.1, 0);
+      addAt(lotusBaseGeo, stoneParts, 0, 0.26, 0);
+      addAt(shaftGeo, stoneParts, 0, 0.78, 0);
+      addAt(bandGeo, mossyParts, 0, 0.78, 0);
+      addAt(platformGeo, stoneParts, 0, 1.32, 0);
 
-      const shaft = new THREE.Mesh(shaftGeo, stoneMat);
-      shaft.position.y = 0.78;
-      shaft.castShadow = true;
-
-      const band = new THREE.Mesh(bandGeo, mossyStoneMat);
-      band.position.y = 0.78;
-
-      const platform = new THREE.Mesh(platformGeo, stoneMat);
-      platform.position.y = 1.32;
-      platform.castShadow = true;
-
-      // Hollow 6-pillar fire chamber (hibukuro)
       for (let p = 0; p < 6; p++) {
         const a = (p / 6) * Math.PI * 2;
-        const pillar = new THREE.Mesh(pillarGeo, stoneMat);
-        pillar.position.set(Math.cos(a) * 0.24, 1.58, Math.sin(a) * 0.24);
-        pillar.castShadow = true;
-        group.add(pillar);
+        addAt(pillarGeo, stoneParts, Math.cos(a) * 0.24, 1.58, Math.sin(a) * 0.24);
       }
 
-      // Inner warm flickering flame & translucent paper/lattice core
+      addAt(eaveRingGeo, mossyParts, 0, 1.81, 0);
+      addAt(roofGeo, mossyParts, 0, 1.98, 0);
+      addAt(finialGeo, stoneParts, 0, 2.22, 0);
+
+      // Inner warm flickering flame & interactive hit box
       const coreMat = new THREE.MeshStandardMaterial({
         color: '#ffe29e',
         emissive: '#ff962e',
@@ -328,44 +401,18 @@ export class ArchitectureSystem implements IWorldSystem {
       this.materials.push(coreMat);
 
       const flame = new THREE.Mesh(flameGeo, coreMat);
-      flame.position.y = 1.54;
+      flame.position.set(x, y + 1.54, z);
       flame.userData = { interactableType: 'lantern', lanternId: idx };
       this.flameMeshes.push(flame);
 
-      // Invisible hit volume around the fire chamber for easy clicking
       const chamberHit = new THREE.Mesh(hitBoxGeo, hitMat);
-      chamberHit.position.y = 1.58;
+      chamberHit.position.set(x, y + 1.58, z);
       chamberHit.userData = { interactableType: 'lantern', lanternId: idx };
 
-      const eaveRing = new THREE.Mesh(eaveRingGeo, mossyStoneMat);
-      eaveRing.position.y = 1.81;
-      eaveRing.castShadow = true;
-
-      const roof = new THREE.Mesh(roofGeo, mossyStoneMat);
-      roof.position.y = 1.98;
-      roof.castShadow = true;
-
-      const finial = new THREE.Mesh(finialGeo, stoneMat);
-      finial.position.y = 2.22;
-      finial.castShadow = true;
-
       const light = new THREE.PointLight('#ff9f45', 0, 13, 1.75);
-      light.position.set(0, 1.56, 0);
+      light.position.set(x, y + 1.56, z);
 
-      group.add(
-        plinth,
-        lotusBase,
-        shaft,
-        band,
-        platform,
-        flame,
-        chamberHit,
-        eaveRing,
-        roof,
-        finial,
-        light,
-      );
-      this.root.add(group);
+      this.root.add(flame, chamberHit, light);
 
       const entity: LanternEntity = {
         id: idx,
@@ -378,6 +425,19 @@ export class ArchitectureSystem implements IWorldSystem {
       this.lanterns.push(entity);
       this.interactiveLanterns.push(chamberHit, flame);
     });
+
+    plinthGeo.dispose();
+    lotusBaseGeo.dispose();
+    shaftGeo.dispose();
+    bandGeo.dispose();
+    platformGeo.dispose();
+    pillarGeo.dispose();
+    roofGeo.dispose();
+    eaveRingGeo.dispose();
+    finialGeo.dispose();
+
+    this.mergeBucket(stoneParts, stoneMat, 'lanterns-stone');
+    this.mergeBucket(mossyParts, mossyStoneMat, 'lanterns-mossy');
   }
 
   private buildRiversideCamp(
@@ -388,107 +448,175 @@ export class ArchitectureSystem implements IWorldSystem {
     canvasMat: THREE.Material,
     kettleMat: THREE.Material,
   ): void {
-    const campX = 13.0;
-    const campZ = 6.0;
+    const [campX, campZ] = this.biome.landmarks.campsiteCenter;
     const campY = this.heightfield.getHeightAt(campX, campZ);
 
-    const camp = new THREE.Group();
-    camp.position.set(campX, campY, campZ);
+    // Record tent and firepit as wildlife avoidance obstacles
+    this.obstacles.push(
+      { x: campX + 2.5, y: campY + 1.0, z: campZ - 1.7, radius: 2.1 },
+      { x: campX, y: campY + 0.5, z: campZ, radius: 1.4 },
+    );
 
-    // 1. Detailed A-frame Ridge Tent with wooden ridgepole, stakes, and woven mat
-    const tentGroup = new THREE.Group();
-    tentGroup.position.set(2.5, 0, -1.7);
-    tentGroup.rotation.y = -0.42;
+    const campOrigin = new THREE.Matrix4().makeTranslation(campX, campY, campZ);
+    const canvasParts: THREE.BufferGeometry[] = [];
+    const woodParts: THREE.BufferGeometry[] = [];
+    const cutWoodParts: THREE.BufferGeometry[] = [];
+    const charredParts: THREE.BufferGeometry[] = [];
+    const stoneParts: THREE.BufferGeometry[] = [];
+    const kettleParts: THREE.BufferGeometry[] = [];
 
-    const panelGeo = this.trackGeo(new THREE.PlaneGeometry(2.75, 2.08, 4, 4));
-    panelGeo.rotateY(Math.PI / 2);
-    for (const side of [-1, 1]) {
-      const panel = new THREE.Mesh(panelGeo, canvasMat);
-      panel.position.set(side * 0.55, 0.88, 0);
-      panel.rotation.z = side * 0.56;
-      panel.castShadow = true;
-      panel.receiveShadow = true;
-      tentGroup.add(panel);
-    }
+    const dummy = new THREE.Object3D();
+    const worldMat = new THREE.Matrix4();
 
-    const ridgePoleGeo = this.trackGeo(new THREE.CylinderGeometry(0.045, 0.045, 3.05, 6));
-    ridgePoleGeo.rotateX(Math.PI / 2);
-    const ridgePole = new THREE.Mesh(ridgePoleGeo, woodMat);
-    ridgePole.position.set(0, 1.78, 0);
-    ridgePole.castShadow = true;
-
-    const uprightPoleGeo = this.trackGeo(new THREE.CylinderGeometry(0.045, 0.055, 1.84, 6));
-    const frontPole = new THREE.Mesh(uprightPoleGeo, woodMat);
-    frontPole.position.set(0, 0.92, 1.38);
-    const backPole = new THREE.Mesh(uprightPoleGeo, woodMat);
-    backPole.position.set(0, 0.92, -1.38);
-
-    // Warm woven sleeping mat inside tent
-    const matGeo = this.trackGeo(new THREE.BoxGeometry(1.35, 0.06, 2.2));
-    const sleepingMat = new THREE.Mesh(matGeo, cutWoodMat);
-    sleepingMat.position.set(0, 0.04, -0.1);
-    sleepingMat.receiveShadow = true;
-
-    tentGroup.add(ridgePole, frontPole, backPole, sleepingMat);
-    camp.add(tentGroup);
-
-    // 2. Split Log Benches with end-grain caps and support chocks
-    const logBodyGeo = this.trackGeo(new THREE.CylinderGeometry(0.22, 0.24, 1.85, 10));
-    logBodyGeo.rotateZ(Math.PI / 2);
-    const logEndGeo = this.trackGeo(new THREE.CylinderGeometry(0.19, 0.19, 1.88, 10));
-    logEndGeo.rotateZ(Math.PI / 2);
-    const chockGeo = this.trackGeo(new THREE.BoxGeometry(0.26, 0.18, 0.42));
-
-    const makeBench = (bx: number, bz: number, rotY: number) => {
-      const bGroup = new THREE.Group();
-      bGroup.position.set(bx, 0, bz);
-      bGroup.rotation.y = rotY;
-
-      const bark = new THREE.Mesh(logBodyGeo, woodMat);
-      bark.position.y = 0.25;
-      bark.castShadow = true;
-      bark.receiveShadow = true;
-
-      const ends = new THREE.Mesh(logEndGeo, cutWoodMat);
-      ends.position.y = 0.25;
-
-      const chockL = new THREE.Mesh(chockGeo, woodMat);
-      chockL.position.set(-0.62, 0.09, 0);
-      const chockR = new THREE.Mesh(chockGeo, woodMat);
-      chockR.position.set(0.62, 0.09, 0);
-
-      bGroup.add(bark, ends, chockL, chockR);
-      camp.add(bGroup);
+    const bakeUnder = (
+      parentMat: THREE.Matrix4,
+      geo: THREE.BufferGeometry,
+      bucket: THREE.BufferGeometry[],
+      px: number,
+      py: number,
+      pz: number,
+      rx = 0,
+      ry = 0,
+      rz = 0,
+      sx = 1,
+      sy = 1,
+      sz = 1,
+    ) => {
+      dummy.position.set(px, py, pz);
+      dummy.rotation.set(rx, ry, rz);
+      dummy.scale.set(sx, sy, sz);
+      dummy.updateMatrix();
+      worldMat.multiplyMatrices(parentMat, dummy.matrix);
+      bucket.push(this.bakePart(geo, worldMat));
     };
 
-    makeBench(-1.35, 1.45, 0.45);
-    makeBench(1.35, 1.65, -0.5);
+    // 1. Detailed A-frame Ridge Tent with wooden ridgepole and sleeping mat
+    dummy.position.set(2.5, 0, -1.7);
+    dummy.rotation.set(0, -0.42, 0);
+    dummy.scale.set(1, 1, 1);
+    dummy.updateMatrix();
+    const tentMat = new THREE.Matrix4().multiplyMatrices(campOrigin, dummy.matrix);
+
+    const panelGeo = new THREE.PlaneGeometry(2.75, 2.08, 4, 4);
+    panelGeo.rotateY(Math.PI / 2);
+    for (const side of [-1, 1]) {
+      bakeUnder(tentMat, panelGeo, canvasParts, side * 0.55, 0.88, 0, 0, 0, side * 0.56);
+    }
+
+    const ridgePoleGeo = new THREE.CylinderGeometry(0.045, 0.045, 3.05, 6);
+    ridgePoleGeo.rotateX(Math.PI / 2);
+    bakeUnder(tentMat, ridgePoleGeo, woodParts, 0, 1.78, 0);
+
+    const uprightPoleGeo = new THREE.CylinderGeometry(0.045, 0.055, 1.84, 6);
+    bakeUnder(tentMat, uprightPoleGeo, woodParts, 0, 0.92, 1.38);
+    bakeUnder(tentMat, uprightPoleGeo, woodParts, 0, 0.92, -1.38);
+
+    const matGeo = new THREE.BoxGeometry(1.35, 0.06, 2.2);
+    bakeUnder(tentMat, matGeo, cutWoodParts, 0, 0.04, -0.1);
+
+    // 2. Split Log Benches with end-grain caps and support chocks
+    const logBodyGeo = new THREE.CylinderGeometry(0.22, 0.24, 1.85, 10);
+    logBodyGeo.rotateZ(Math.PI / 2);
+    const logEndGeo = new THREE.CylinderGeometry(0.19, 0.19, 1.88, 10);
+    logEndGeo.rotateZ(Math.PI / 2);
+    const chockGeo = new THREE.BoxGeometry(0.26, 0.18, 0.42);
+
+    const addBench = (bx: number, bz: number, rotY: number) => {
+      dummy.position.set(bx, 0, bz);
+      dummy.rotation.set(0, rotY, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      const benchMat = new THREE.Matrix4().multiplyMatrices(campOrigin, dummy.matrix);
+      bakeUnder(benchMat, logBodyGeo, woodParts, 0, 0.25, 0);
+      bakeUnder(benchMat, logEndGeo, cutWoodParts, 0, 0.25, 0);
+      bakeUnder(benchMat, chockGeo, woodParts, -0.62, 0.09, 0);
+      bakeUnder(benchMat, chockGeo, woodParts, 0.62, 0.09, 0);
+    };
+
+    addBench(-1.35, 1.45, 0.45);
+    addBench(1.35, 1.65, -0.5);
 
     // 3. Stone-ringed Campfire Pit + Radially Stacked Firewood + Tripod Kettle
-    const pebbleGeo = this.trackGeo(new THREE.DodecahedronGeometry(0.19, 1));
+    const pebbleGeo = new THREE.DodecahedronGeometry(0.19, 1);
     for (let i = 0; i < 11; i++) {
       const a = (i / 11) * Math.PI * 2;
-      const s = new THREE.Mesh(pebbleGeo, stoneMat);
-      s.position.set(Math.cos(a) * 0.68, 0.1, Math.sin(a) * 0.68);
-      s.scale.set(1.25, 0.72, 1.05);
-      s.rotation.y = a;
-      s.castShadow = true;
-      camp.add(s);
+      bakeUnder(
+        campOrigin,
+        pebbleGeo,
+        stoneParts,
+        Math.cos(a) * 0.68,
+        0.1,
+        Math.sin(a) * 0.68,
+        0,
+        a,
+        0,
+        1.25,
+        0.72,
+        1.05,
+      );
     }
 
-    // Radially stacked firewood logs with glowing charred tips
-    const firewoodGeo = this.trackGeo(new THREE.CylinderGeometry(0.065, 0.08, 0.92, 7));
+    const firewoodGeo = new THREE.CylinderGeometry(0.065, 0.08, 0.92, 7);
     for (let f = 0; f < 6; f++) {
       const a = (f / 6) * Math.PI * 2 + 0.2;
-      const log = new THREE.Mesh(firewoodGeo, f % 2 === 0 ? charredWoodMat : woodMat);
-      log.position.set(Math.cos(a) * 0.24, 0.18, Math.sin(a) * 0.24);
-      log.rotation.z = Math.cos(a) * 1.05;
-      log.rotation.x = -Math.sin(a) * 1.05;
-      log.castShadow = true;
-      camp.add(log);
+      bakeUnder(
+        campOrigin,
+        firewoodGeo,
+        f % 2 === 0 ? charredParts : woodParts,
+        Math.cos(a) * 0.24,
+        0.18,
+        Math.sin(a) * 0.24,
+        -Math.sin(a) * 1.05,
+        0,
+        Math.cos(a) * 1.05,
+      );
     }
 
-    // Glowing ember bed + inner flame cone
+    const tripodPoleGeo = new THREE.CylinderGeometry(0.028, 0.042, 1.75, 6);
+    for (let p = 0; p < 3; p++) {
+      const a = (p / 3) * Math.PI * 2 + 0.35;
+      bakeUnder(
+        campOrigin,
+        tripodPoleGeo,
+        woodParts,
+        Math.cos(a) * 0.42,
+        0.78,
+        Math.sin(a) * 0.42,
+        -Math.sin(a) * 0.46,
+        0,
+        Math.cos(a) * 0.46,
+      );
+    }
+
+    const kettleBodyGeo = new THREE.SphereGeometry(0.19, 10, 8);
+    kettleBodyGeo.scale(1.15, 0.85, 1.15);
+    bakeUnder(campOrigin, kettleBodyGeo, kettleParts, 0, 0.64, 0);
+
+    const chainGeo = new THREE.CylinderGeometry(0.008, 0.008, 0.78, 4);
+    bakeUnder(campOrigin, chainGeo, kettleParts, 0, 1.06, 0);
+
+    // Dispose camp template primitives
+    panelGeo.dispose();
+    ridgePoleGeo.dispose();
+    uprightPoleGeo.dispose();
+    matGeo.dispose();
+    logBodyGeo.dispose();
+    logEndGeo.dispose();
+    chockGeo.dispose();
+    pebbleGeo.dispose();
+    firewoodGeo.dispose();
+    tripodPoleGeo.dispose();
+    kettleBodyGeo.dispose();
+    chainGeo.dispose();
+
+    this.mergeBucket(canvasParts, canvasMat, 'camp-canvas');
+    this.mergeBucket(woodParts, woodMat, 'camp-wood');
+    this.mergeBucket(cutWoodParts, cutWoodMat, 'camp-cut-wood');
+    this.mergeBucket(charredParts, charredWoodMat, 'camp-charred');
+    this.mergeBucket(stoneParts, stoneMat, 'camp-stones');
+    this.mergeBucket(kettleParts, kettleMat, 'camp-kettle');
+
+    // Glowing ember bed (animated intensity) + campfire point light
     const emberGeo = this.trackGeo(new THREE.SphereGeometry(0.32, 10, 8));
     this.emberMat = new THREE.MeshStandardMaterial({
       color: '#3a1a0c',
@@ -499,43 +627,19 @@ export class ArchitectureSystem implements IWorldSystem {
     this.materials.push(this.emberMat);
     const ember = new THREE.Mesh(emberGeo, this.emberMat);
     ember.scale.set(1.25, 0.42, 1.25);
-    ember.position.y = 0.08;
-    camp.add(ember);
-
-    // Wooden tripod & suspended cast-iron kettle over the fire
-    const tripodPoleGeo = this.trackGeo(new THREE.CylinderGeometry(0.028, 0.042, 1.75, 6));
-    for (let p = 0; p < 3; p++) {
-      const a = (p / 3) * Math.PI * 2 + 0.35;
-      const pole = new THREE.Mesh(tripodPoleGeo, woodMat);
-      pole.position.set(Math.cos(a) * 0.42, 0.78, Math.sin(a) * 0.42);
-      pole.rotation.z = Math.cos(a) * 0.46;
-      pole.rotation.x = -Math.sin(a) * 0.46;
-      pole.castShadow = true;
-      camp.add(pole);
-    }
-
-    const kettleBodyGeo = this.trackGeo(new THREE.SphereGeometry(0.19, 10, 8));
-    kettleBodyGeo.scale(1.15, 0.85, 1.15);
-    const kettle = new THREE.Mesh(kettleBodyGeo, kettleMat);
-    kettle.position.set(0, 0.64, 0);
-    kettle.castShadow = true;
-
-    const chainGeo = this.trackGeo(new THREE.CylinderGeometry(0.008, 0.008, 0.78, 4));
-    const chain = new THREE.Mesh(chainGeo, kettleMat);
-    chain.position.set(0, 1.06, 0);
-    camp.add(kettle, chain);
+    ember.position.set(campX, campY + 0.08, campZ);
+    this.root.add(ember);
 
     this.campfireLight = new THREE.PointLight('#ff7b29', 2.6, 15, 1.65);
-    this.campfireLight.position.set(0, 0.58, 0);
-    camp.add(this.campfireLight);
-
-    this.root.add(camp);
+    this.campfireLight.position.set(campX, campY + 0.58, campZ);
+    this.root.add(this.campfireLight);
   }
 
   private setLanternState(lantern: LanternEntity, lit: boolean): void {
     lantern.lit = lit;
     lantern.coreMat.emissiveIntensity = lit ? 2.8 : 0.05;
     lantern.light.intensity = lit ? 3.0 : 0;
+    lantern.light.visible = lit && this.currentQuality !== 'low';
     lantern.flameMesh.visible = true;
   }
 
@@ -580,8 +684,16 @@ export class ArchitectureSystem implements IWorldSystem {
       this.unsubWeather();
       this.unsubWeather = null;
     }
+    for (const inst of this.instancedMeshes) {
+      inst.dispose();
+    }
+    this.instancedMeshes = [];
     this.scene.remove(this.root);
     this.root.clear();
+    for (const g of this.bvhGeometries) {
+      g.disposeBoundsTree?.();
+    }
+    this.bvhGeometries = [];
     for (const g of this.geometries) g.dispose();
     this.geometries = [];
     for (const m of this.materials) m.dispose();
@@ -589,6 +701,7 @@ export class ArchitectureSystem implements IWorldSystem {
     this.lanterns = [];
     this.flameMeshes = [];
     this.interactiveLanterns.length = 0;
+    this.obstacles.length = 0;
     this.campfireLight = null;
     this.emberMat = null;
   }

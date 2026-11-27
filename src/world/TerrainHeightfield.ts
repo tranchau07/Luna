@@ -1,6 +1,6 @@
 import Alea from 'alea';
 import { createNoise2D, type NoiseFunction2D } from 'simplex-noise';
-import type { TerrainConfig } from '../config/BiomeConfig';
+import type { LandmarksConfig, TerrainConfig } from '../config/BiomeConfig';
 
 function smoothstep(edge0: number, edge1: number, x: number): number {
   const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
@@ -15,9 +15,13 @@ export class TerrainHeightfield {
   private readonly noiseMain: NoiseFunction2D;
   private readonly noiseDetail: NoiseFunction2D;
   readonly config: TerrainConfig;
+  private readonly campsiteCenter: [number, number];
+  private readonly bridgeZ: number;
 
-  constructor(config: TerrainConfig, seed: string) {
+  constructor(config: TerrainConfig, seed: string, landmarks?: LandmarksConfig) {
     this.config = config;
+    this.campsiteCenter = landmarks?.campsiteCenter ?? [13.0, 6.0];
+    this.bridgeZ = landmarks?.bridgeZ ?? 6.0;
     const prng = Alea(seed);
     this.noiseMain = createNoise2D(prng);
     this.noiseDetail = createNoise2D(Alea(`${seed}-detail`));
@@ -105,13 +109,17 @@ export class TerrainHeightfield {
         ? 1 - smoothstep(streamWidth * 0.55, streamWidth * 2.1, distFromStream)
         : 0;
 
-    // Flatten east campsite clearing around (12, 5)
-    const distCamp = Math.hypot(x - 13, z - 6);
+    // Flatten east campsite clearing around configured campsiteCenter
+    const [campX, campZ] = this.campsiteCenter;
+    const distCamp = Math.hypot(x - campX, z - campZ);
     const campMask = 1 - smoothstep(3.5, 11.5, distCamp);
     height = height * (1 - campMask * 0.78) + 1.45 * (campMask * 0.78);
 
-    // Flatten gently around bridge approaches near z = 6
-    const distBridgeBank = Math.hypot(Math.abs(x - this.getStreamCenterX(6)) - 5.5, z - 6);
+    // Flatten gently around bridge approaches near configured bridgeZ
+    const distBridgeBank = Math.hypot(
+      Math.abs(x - this.getStreamCenterX(this.bridgeZ)) - 5.5,
+      z - this.bridgeZ,
+    );
     const bridgeMask = 1 - smoothstep(1.5, 5.5, distBridgeBank);
     height = height * (1 - bridgeMask * 0.65) + 0.85 * (bridgeMask * 0.65);
 

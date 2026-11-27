@@ -8,12 +8,14 @@ describe('BiomeConfig & EventBus', () => {
     expect(validateBiomeConfig(crystalValleyBiome)).toEqual([]);
   });
 
-  it('rejects invalid exposure and missing presets', () => {
+  it('rejects invalid exposure, empty landmarks, and missing presets', () => {
     const broken = structuredClone(crystalValleyBiome);
     broken.weatherPresets.noon.exposure = 2.5;
     broken.cameraPresets = [];
+    broken.landmarks.lanternPositions = [];
+    broken.landmarks.deerSpawnZones = [];
     const errors = validateBiomeConfig(broken);
-    expect(errors.length).toBeGreaterThanOrEqual(2);
+    expect(errors.length).toBeGreaterThanOrEqual(4);
   });
 
   it('emits and unsubscribes typed events on EventBus', () => {

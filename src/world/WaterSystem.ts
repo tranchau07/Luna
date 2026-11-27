@@ -111,6 +111,13 @@ export class WaterSystem implements IWorldSystem {
         uFoamColor: { value: new THREE.Color(foamColor) },
         uCausticIntensity: { value: causticIntensity },
         uRipples: { value: this.rippleData },
+        uPlungePos: {
+          value: new THREE.Vector2(
+            this.biome.landmarks.waterfallPlungePos[0],
+            this.biome.landmarks.waterfallPlungePos[1],
+          ),
+        },
+        uFordZ: { value: this.biome.landmarks.steppingStonesZ },
       },
       vertexShader: /* glsl */ `
         attribute float aDepth;
@@ -149,6 +156,8 @@ export class WaterSystem implements IWorldSystem {
         uniform vec3 uFoamColor;
         uniform float uCausticIntensity;
         uniform vec4 uRipples[4];
+        uniform vec2 uPlungePos;
+        uniform float uFordZ;
         varying float vDepth;
         varying vec3 vWaterWorldPos;
 
@@ -219,12 +228,12 @@ export class WaterSystem implements IWorldSystem {
           float shoreFoam = smoothstep(0.45, 0.85, foamNoise + shoreEdge * 0.55) * shoreEdge * 0.52;
 
           // Waterfall plunge pool aeration foam
-          float fallDist = distance(vWaterWorldPos.xz, vec2(0.0, -24.5));
+          float fallDist = distance(vWaterWorldPos.xz, uPlungePos);
           float plungeMask = 1.0 - smoothstep(1.2, 5.2, fallDist);
           float plungeFoam = plungeMask * smoothstep(0.28, 0.78, foamNoise + plungeMask * 0.45) * 0.72;
 
-          // Stepping-stone ford wake foam near z = 16.5
-          float fordDist = abs(vWaterWorldPos.z - 16.5);
+          // Stepping-stone ford wake foam near configured steppingStonesZ
+          float fordDist = abs(vWaterWorldPos.z - uFordZ);
           float fordMask = (1.0 - smoothstep(0.2, 1.4, fordDist)) * (1.0 - smoothstep(0.05, 0.45, vDepth));
           float fordWake = fordMask * smoothstep(0.42, 0.82, foamNoise) * 0.45;
 

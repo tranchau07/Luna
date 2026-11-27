@@ -71,6 +71,16 @@ export interface WildlifeConfig {
   butterflyCount: number;
 }
 
+export interface LandmarksConfig {
+  bridgeZ: number;
+  steppingStonesZ: number;
+  campsiteCenter: [number, number];
+  lanternPositions: Array<[number, number]>;
+  deerSpawnZones: Array<[number, number]>;
+  deerDrinkSpot: [number, number];
+  waterfallPlungePos: [number, number];
+}
+
 export interface BiomeConfig {
   id: string;
   name: string;
@@ -79,6 +89,7 @@ export interface BiomeConfig {
   water: WaterPalette;
   foliage: FoliagePalette;
   wildlife: WildlifeConfig;
+  landmarks: LandmarksConfig;
   weatherPresets: Record<WeatherMode, WeatherPreset>;
   defaultWeather: WeatherMode;
   cameraPresets: CameraPreset[];
@@ -103,6 +114,12 @@ export function validateBiomeConfig(config: BiomeConfig): string[] {
   }
   if (config.cameraPresets.length === 0) {
     errors.push('At least one camera preset is required');
+  }
+  if (!config.landmarks || config.landmarks.lanternPositions.length === 0) {
+    errors.push('At least one lantern landmark position is required');
+  }
+  if (!config.landmarks || config.landmarks.deerSpawnZones.length === 0) {
+    errors.push('At least one deer spawn zone is required');
   }
 
   for (const mode of Object.keys(config.weatherPresets) as WeatherMode[]) {

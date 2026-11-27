@@ -129,11 +129,13 @@ export class ParticleSystem implements IWorldSystem {
       renderOrder: 5,
       behaviors: [new ApplyForce(new QVector3(0.06, 0.02, 0.08), new ConstantValue(1))],
     });
-    poolMist.emitter.position.set(0, 0.25, -10);
+    const [poolX, poolZ] = this.biome.terrain.poolCenter;
+    poolMist.emitter.position.set(poolX, 0.25, poolZ);
     this.registerQuarksSystem(poolMist);
 
-    // 3. Campfire Smoke Plume & Glowing Ember Sparks at (13.0, campY, 6.0)
-    const campY = this.heightfield.getHeightAt(13.0, 6.0);
+    // 3. Campfire Smoke Plume & Glowing Ember Sparks at configured campsite center
+    const [campX, campZ] = this.biome.landmarks.campsiteCenter;
+    const campY = this.heightfield.getHeightAt(campX, campZ);
     const campSmoke = new QuarksParticleSystem({
       duration: 5,
       looping: true,
@@ -153,7 +155,7 @@ export class ParticleSystem implements IWorldSystem {
       ],
     });
     campSmoke.emitter.rotation.x = -Math.PI / 2;
-    campSmoke.emitter.position.set(13.0, campY + 0.55, 6.0);
+    campSmoke.emitter.position.set(campX, campY + 0.55, campZ);
     this.registerQuarksSystem(campSmoke);
 
     const campSparks = new QuarksParticleSystem({
@@ -172,10 +174,10 @@ export class ParticleSystem implements IWorldSystem {
       behaviors: [new ApplyForce(new QVector3(0.22, 0.65, -0.12), new ConstantValue(1))],
     });
     campSparks.emitter.rotation.x = -Math.PI / 2;
-    campSparks.emitter.position.set(13.0, campY + 0.22, 6.0);
+    campSparks.emitter.position.set(campX, campY + 0.22, campZ);
     this.registerQuarksSystem(campSparks);
 
-    // 4. Nocturnal Fireflies (toggled by weather preset)
+    // 4. Nocturnal Fireflies (emission rate toggled by weather preset so active fireflies fade out naturally)
     const fireflies = new QuarksParticleSystem({
       duration: 6,
       looping: true,
@@ -183,7 +185,7 @@ export class ParticleSystem implements IWorldSystem {
       startSpeed: new IntervalValue(0.15, 0.48),
       startSize: new IntervalValue(0.16, 0.32),
       startColor: new ColorRange(new QVector4(0.75, 1.0, 0.38, 0.95), new QVector4(1.0, 0.92, 0.45, 0.85)),
-      emissionOverTime: new ConstantValue(11),
+      emissionOverTime: new ConstantValue(0),
       shape: new SphereEmitter({ radius: 18, thickness: 1 }),
       material: glowMat,
       renderMode: RenderMode.BillBoard,
@@ -281,10 +283,9 @@ export class ParticleSystem implements IWorldSystem {
   private applyWeather(mode: WeatherMode): void {
     const active = this.biome.weatherPresets[mode]?.firefliesActive ?? false;
     if (this.fireflySystem) {
+      this.fireflySystem.emissionOverTime = new ConstantValue(active ? 11 : 0);
       if (active) {
         this.fireflySystem.play();
-      } else {
-        this.fireflySystem.pause();
       }
     }
   }

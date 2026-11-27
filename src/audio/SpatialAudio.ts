@@ -31,6 +31,7 @@ export class SpatialAudio implements IWorldSystem {
 
   private unsubs: Array<() => void> = [];
   private onVisibilityBound: () => void;
+  private suspendTimeout: number | null = null;
 
   constructor(
     camera: THREE.Camera,
@@ -60,6 +61,7 @@ export class SpatialAudio implements IWorldSystem {
         this.currentWeather = mode;
       }),
       this.bus.on('water:ripple', () => this.playWaterDropChime()),
+      this.bus.on('pomodoro:complete', () => this.playSingingBowlChime()),
     );
     document.addEventListener('visibilitychange', this.onVisibilityBound);
   }
@@ -138,9 +140,6 @@ export class SpatialAudio implements IWorldSystem {
     this.enabled = enabled;
     if (enabled) {
       this.ensureAudioGraph();
-      if (this.listener && this.listener.context.state === 'suspended') {
-        void this.listener.context.resume();
-      }
     }
     this.syncGain();
   }
@@ -160,11 +159,29 @@ export class SpatialAudio implements IWorldSystem {
     const muted = !this.enabled || (this.muteOnHide && document.hidden);
     const target = muted ? 0 : this.volume;
 
+    if (this.suspendTimeout !== null) {
+      window.clearTimeout(this.suspendTimeout);
+      this.suspendTimeout = null;
+    }
+
+    if (!muted && ctx.state === 'suspended') {
+      void ctx.resume();
+    }
+
     if (this.masterGain) {
-      this.masterGain.gain.setTargetAtTime(target, ctx.currentTime, 0.15);
+      this.masterGain.gain.setTargetAtTime(target, ctx.currentTime, 0.12);
     }
     if (this.waterfallAudio) {
       this.waterfallAudio.setVolume(muted ? 0 : this.volume * 1.15);
+    }
+
+    if (muted && ctx.state === 'running') {
+      this.suspendTimeout = window.setTimeout(() => {
+        this.suspendTimeout = null;
+        if (this.listener && (!this.enabled || (this.muteOnHide && document.hidden))) {
+          void this.listener.context.suspend();
+        }
+      }, 220);
     }
   }
 
@@ -190,6 +207,32 @@ export class SpatialAudio implements IWorldSystem {
     gain.connect(this.masterGain);
     osc.start(now);
     osc.stop(now + 0.48);
+  }
+
+  private playSingingBowlChime(): void {
+    if (!this.enabled || !this.listener || !this.masterGain) return;
+    const ctx = this.listener.context;
+    const now = ctx.currentTime;
+
+    // Warm harmonic singing bowl (fundamental + fifth + shimmer overtone)
+    const partials = [
+      { freq: 432.0, amp: 0.14, dur: 2.6 },
+      { freq: 648.0, amp: 0.06, dur: 2.1 },
+      { freq: 864.0, amp: 0.03, dur: 1.6 },
+    ];
+    for (const p of partials) {
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(p.freq, now);
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.linearRampToValueAtTime(p.amp, now + 0.06);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + p.dur);
+      osc.connect(gain);
+      gain.connect(this.masterGain);
+      osc.start(now);
+      osc.stop(now + p.dur + 0.05);
+    }
   }
 
   private triggerAmbientChirp(): void {
@@ -248,6 +291,10 @@ export class SpatialAudio implements IWorldSystem {
 
   dispose(): void {
     document.removeEventListener('visibilitychange', this.onVisibilityBound);
+    if (this.suspendTimeout !== null) {
+      window.clearTimeout(this.suspendTimeout);
+      this.suspendTimeout = null;
+    }
     for (const unsub of this.unsubs) unsub();
     this.unsubs = [];
 

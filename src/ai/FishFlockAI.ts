@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+import CustomShaderMaterial from 'three-custom-shader-material/vanilla';
 import * as YUKA from 'yuka';
 import Alea from 'alea';
 import type { AssetLoader } from '../core/AssetLoader';
@@ -7,22 +9,53 @@ import type { RockObstacle } from '../world/RockSystem';
 
 export interface KoiAgent {
   id: string;
+  label: string;
   vehicle: YUKA.Vehicle;
-  root: THREE.Group;
-  bodyGroup: THREE.Group;
-  tailGroup: THREE.Group;
-  dorsalFin: THREE.Mesh;
-  finLeft: THREE.Mesh;
-  finRight: THREE.Mesh;
+  root: THREE.Object3D;
   arriveBehavior: YUKA.ArriveBehavior;
   wanderBehavior: YUKA.WanderBehavior;
   phase: number;
+  scale: number;
+  variant: number;
+  variantIdx: number;
+  globalIdx: number;
 }
+
+function normalizeForMerge(geo: THREE.BufferGeometry): THREE.BufferGeometry {
+  const g = geo.index ? geo.toNonIndexed() : geo.clone();
+  for (const key of Object.keys(g.attributes)) {
+    if (key !== 'position' && key !== 'normal' && key !== 'uv') {
+      g.deleteAttribute(key);
+    }
+  }
+  if (!g.attributes.normal) g.computeVertexNormals();
+  if (!g.attributes.uv) {
+    g.setAttribute('uv', new THREE.BufferAttribute(new Float32Array(g.attributes.position.count * 2), 2));
+  }
+  return g;
+}
+
+const KOI_SWIM_VERT = /* glsl */ `
+  attribute float aPhase;
+  uniform float uTime;
+  void main() {
+    vec3 p = position;
+    // Traveling S-curve swim wave along koi spine (+z head -> -z caudal tail)
+    float tailT = clamp((0.36 - p.z) / 0.85, 0.0, 1.0);
+    float wave = sin(uTime * 7.2 + aPhase - p.z * 5.2);
+    p.x += wave * (0.018 + tailT * tailT * 0.14);
+    // Subtle pectoral fin flutter on outer lateral vertices
+    float lateral = smoothstep(0.11, 0.28, abs(p.x));
+    p.y += sin(uTime * 5.2 + aPhase) * lateral * 0.032;
+    csm_Position = p;
+  }
+`;
 
 /**
  * Manages a Yuka-driven koi school with Wander, Cohesion, Alignment, Separation,
  * ObstacleAvoidance around boulders, and interactive Arrive summoning when clicking water.
- * Each koi features Kohaku/Sanke/Showa patterned skin, dorsal fin, forked caudal tail, eyes, and barbels.
+ * Rendered via 5 GPU-animated InstancedMeshes (3 skin variants + 1 fins/tail + 1 eyes)
+ * with smooth vertex-shader S-curve undulation and per-instance click picking.
  */
 export class FishFlockAI {
   readonly agents: KoiAgent[] = [];
@@ -34,9 +67,15 @@ export class FishFlockAI {
   private readonly obstacles: RockObstacle[];
   private readonly assets: AssetLoader;
 
+  private bodyInsts: THREE.InstancedMesh[] = [];
+  private finInst: THREE.InstancedMesh | null = null;
+  private eyeInst: THREE.InstancedMesh | null = null;
+  private swimMats: CustomShaderMaterial[] = [];
+
   private geometries: THREE.BufferGeometry[] = [];
   private materials: THREE.Material[] = [];
   private yukaObstacles: YUKA.GameEntity[] = [];
+  private dummy = new THREE.Object3D();
   private summonTimer = 0;
 
   constructor(
@@ -54,67 +93,94 @@ export class FishFlockAI {
   }
 
   init(): void {
+    const count = this.biome.wildlife.koiCount;
+    if (count <= 0) return;
+
     const prng = Alea(`${this.biome.seed}-koi`);
     const [poolX, poolZ] = this.biome.terrain.poolCenter;
     const poolRadius = this.biome.terrain.poolRadius * 0.68;
 
-    // 1. Hydrodynamic teardrop fusiform koi body geometry
-    const bodyGeo = new THREE.SphereGeometry(0.15, 16, 12);
-    const bPos = bodyGeo.attributes.position as THREE.BufferAttribute;
+    // 1. Hydrodynamic teardrop fusiform koi body template
+    const baseBodyGeo = new THREE.SphereGeometry(0.15, 16, 12);
+    const bPos = baseBodyGeo.attributes.position as THREE.BufferAttribute;
     for (let i = 0; i < bPos.count; i++) {
       const x = bPos.getX(i);
       const y = bPos.getY(i);
       const z = bPos.getZ(i);
-      // z in [-0.15, +0.15]; +z is head, -z is tail peduncle
-      const t = Math.max(0, Math.min(1, (z / 0.15 + 1) * 0.5)); // 0 at tail, 1 at snout
+      const t = Math.max(0, Math.min(1, (z / 0.15 + 1) * 0.5));
       const widthTaper = Math.sin(Math.pow(t, 0.68) * Math.PI) * 0.92 + 0.14;
       const heightTaper =
         (Math.sin(Math.pow(t, 0.72) * Math.PI) * 0.82 + 0.18) * (y > 0 ? 1.12 : 0.82);
       bPos.setXYZ(i, x * widthTaper, y * heightTaper, z * 2.55);
     }
-    bodyGeo.computeVertexNormals();
+    baseBodyGeo.computeVertexNormals();
 
-    // 2. Dorsal fin, pectoral fins, pelvic fins, forked caudal tail, eyes, and barbels
-    const dorsalGeo = new THREE.PlaneGeometry(0.24, 0.11, 3, 1);
-    dorsalGeo.rotateY(Math.PI / 2);
-    dorsalGeo.translate(0, 0.12, -0.02);
+    // 2. Merge dorsal fin, forked caudal tail, pectoral fins, pelvic fins, and barbels into 1 fin geometry
+    const finParts: THREE.BufferGeometry[] = [];
+    const tmp = new THREE.Object3D();
+    const pushFinPart = (
+      template: THREE.BufferGeometry,
+      px: number,
+      py: number,
+      pz: number,
+      rx = 0,
+      ry = 0,
+      rz = 0,
+      sx = 1,
+      sy = 1,
+      sz = 1,
+    ) => {
+      const g = normalizeForMerge(template);
+      tmp.position.set(px, py, pz);
+      tmp.rotation.set(rx, ry, rz);
+      tmp.scale.set(sx, sy, sz);
+      tmp.updateMatrix();
+      g.applyMatrix4(tmp.matrix);
+      finParts.push(g);
+    };
 
-    const tailLobeGeo = new THREE.ConeGeometry(0.085, 0.32, 4);
-    tailLobeGeo.rotateX(Math.PI / 2);
-    tailLobeGeo.scale(0.22, 1.0, 1.0);
-    tailLobeGeo.translate(0, 0, -0.15);
+    const dorsalT = new THREE.PlaneGeometry(0.24, 0.11, 3, 1);
+    dorsalT.rotateY(Math.PI / 2);
+    pushFinPart(dorsalT, 0, 0.12, -0.02);
 
-    const pectoralGeo = new THREE.ConeGeometry(0.095, 0.22, 4);
-    pectoralGeo.rotateZ(Math.PI / 2);
-    pectoralGeo.scale(1.0, 0.16, 0.85);
+    const tailLobeT = new THREE.ConeGeometry(0.085, 0.32, 4);
+    tailLobeT.rotateX(Math.PI / 2);
+    tailLobeT.scale(0.22, 1.0, 1.0);
+    tailLobeT.translate(0, 0, -0.15);
+    pushFinPart(tailLobeT, 0, 0, -0.34, 0.24, 0, 0, 1, 1, 1);
+    pushFinPart(tailLobeT, 0, 0, -0.34, -0.22, 0, 0, 0.88, 0.88, 0.88);
 
-    const eyeGeo = new THREE.SphereGeometry(0.018, 6, 6);
-    const barbelGeo = new THREE.CylinderGeometry(0.004, 0.001, 0.065, 4);
-    barbelGeo.translate(0, -0.03, 0);
+    const pectoralT = new THREE.ConeGeometry(0.095, 0.22, 4);
+    pectoralT.rotateZ(Math.PI / 2);
+    pectoralT.scale(1.0, 0.16, 0.85);
+    pushFinPart(pectoralT, -0.11, -0.03, 0.11, 0, 0.42, 0, 1, 1, 1);
+    pushFinPart(pectoralT, 0.11, -0.03, 0.11, 0, -0.42, 0, -1, 1, 1);
+    pushFinPart(pectoralT, -0.07, -0.055, -0.1, 0, 0.55, 0, 0.55, 0.55, 0.55);
+    pushFinPart(pectoralT, 0.07, -0.055, -0.1, 0, -0.55, 0, -0.55, 0.55, 0.55);
 
-    this.geometries.push(bodyGeo, dorsalGeo, tailLobeGeo, pectoralGeo, eyeGeo, barbelGeo);
+    const barbelT = new THREE.CylinderGeometry(0.004, 0.001, 0.065, 4);
+    barbelT.translate(0, -0.03, 0);
+    for (const side of [-1, 1]) {
+      pushFinPart(barbelT, side * 0.042, -0.015, 0.34, 0.35, 0, side * 0.45);
+    }
 
-    const finColors = ['#fff5eb', '#ffece0', '#fce3b6'];
-    const sharedMats = [0, 1, 2].map((variant) => {
-      const skinTex = this.assets.getKoiSkinTexture(variant, 256);
-      const bodyMat = new THREE.MeshStandardMaterial({
-        map: skinTex,
-        roughness: 0.2,
-        metalness: 0.08,
-      });
-      const finMat = new THREE.MeshStandardMaterial({
-        color: finColors[variant],
-        roughness: 0.32,
-        transparent: true,
-        opacity: 0.86,
-        side: THREE.DoubleSide,
-      });
-      this.materials.push(bodyMat, finMat);
-      return { bodyMat, finMat };
+    const allFinsGeo = mergeGeometries(finParts, false)!;
+    dorsalT.dispose();
+    tailLobeT.dispose();
+    pectoralT.dispose();
+    barbelT.dispose();
+    finParts.forEach((p) => p.dispose());
+
+    // 3. Merge paired eyes into 1 geometry
+    const eyeT = new THREE.SphereGeometry(0.018, 6, 6);
+    const eyeParts = [-1, 1].map((side) => {
+      const e = normalizeForMerge(eyeT);
+      e.translate(side * 0.068, 0.035, 0.25);
+      return e;
     });
-
-    const eyeMat = new THREE.MeshStandardMaterial({ color: '#111317', roughness: 0.1 });
-    this.materials.push(eyeMat);
+    const eyesGeo = mergeGeometries(eyeParts, false)!;
+    eyeT.dispose();
+    eyeParts.forEach((p) => p.dispose());
 
     // Convert underwater/rim rock obstacles into Yuka avoidance entities
     for (const obs of this.obstacles) {
@@ -127,76 +193,34 @@ export class FishFlockAI {
       }
     }
 
-    for (let i = 0; i < this.biome.wildlife.koiCount; i++) {
-      const palette = sharedMats[i % sharedMats.length];
+    const variantPhases: number[][] = [[], [], []];
+    const variantIds: string[][] = [[], [], []];
+    const variantLabels: string[][] = [[], [], []];
+    const allPhases = new Float32Array(count);
+
+    for (let i = 0; i < count; i++) {
+      const variant = i % 3;
+      const variantIdx = variantPhases[variant].length;
+      const phase = prng() * Math.PI * 2;
+      const scale = 0.85 + prng() * 0.45;
+      const id = `koi-${i}`;
+      const label = `Koi #${i + 1}`;
+
+      variantPhases[variant].push(phase);
+      variantIds[variant].push(id);
+      variantLabels[variant].push(label);
+      allPhases[i] = phase;
+
       const angle = prng() * Math.PI * 2;
       const r = 1.5 + prng() * (poolRadius - 2.0);
       const startX = poolX + Math.cos(angle) * r;
       const startZ = poolZ + Math.sin(angle) * r;
       const startY = this.biome.terrain.waterLevel - (0.36 + prng() * 0.42);
 
-      const root = new THREE.Group();
-      const id = `koi-${i}`;
+      // Lightweight anchor Object3D so CameraRig follow-camera can track individual koi
+      const root = new THREE.Object3D();
       root.name = id;
-
-      const bodyGroup = new THREE.Group();
-      const userData = { interactableType: 'wildlife', entityId: id, label: `Koi #${i + 1}` };
-
-      const body = new THREE.Mesh(bodyGeo, palette.bodyMat);
-      body.castShadow = true;
-      body.userData = userData;
-
-      const dorsalFin = new THREE.Mesh(dorsalGeo, palette.finMat);
-
-      // Eyes & sensory barbels at snout
-      for (const side of [-1, 1]) {
-        const eye = new THREE.Mesh(eyeGeo, eyeMat);
-        eye.position.set(side * 0.068, 0.035, 0.25);
-        const barbel = new THREE.Mesh(barbelGeo, palette.finMat);
-        barbel.position.set(side * 0.042, -0.015, 0.34);
-        barbel.rotation.z = side * 0.45;
-        barbel.rotation.x = 0.35;
-        bodyGroup.add(eye, barbel);
-      }
-
-      // Forked upper and lower caudal tail lobes
-      const tailGroup = new THREE.Group();
-      tailGroup.position.set(0, 0, -0.34);
-      const upperLobe = new THREE.Mesh(tailLobeGeo, palette.finMat);
-      upperLobe.rotation.x = 0.24;
-      const lowerLobe = new THREE.Mesh(tailLobeGeo, palette.finMat);
-      lowerLobe.rotation.x = -0.22;
-      lowerLobe.scale.setScalar(0.88);
-      tailGroup.add(upperLobe, lowerLobe);
-
-      // Paired pectoral and pelvic fins
-      const finLeft = new THREE.Mesh(pectoralGeo, palette.finMat);
-      finLeft.position.set(-0.11, -0.03, 0.11);
-      finLeft.rotation.y = 0.42;
-
-      const finRight = new THREE.Mesh(pectoralGeo, palette.finMat);
-      finRight.position.set(0.11, -0.03, 0.11);
-      finRight.rotation.y = -0.42;
-      finRight.scale.x = -1;
-
-      const pelvicL = new THREE.Mesh(pectoralGeo, palette.finMat);
-      pelvicL.position.set(-0.07, -0.055, -0.1);
-      pelvicL.scale.setScalar(0.55);
-      pelvicL.rotation.y = 0.55;
-
-      const pelvicR = new THREE.Mesh(pectoralGeo, palette.finMat);
-      pelvicR.position.set(0.07, -0.055, -0.1);
-      pelvicR.scale.set(-0.55, 0.55, 0.55);
-      pelvicR.rotation.y = -0.55;
-
-      bodyGroup.add(body, dorsalFin, tailGroup, finLeft, finRight, pelvicL, pelvicR);
-      root.add(bodyGroup);
-
-      const scale = 0.85 + prng() * 0.45;
-      root.scale.setScalar(scale);
       root.position.set(startX, startY, startZ);
-      this.scene.add(root);
-      this.clickableMeshes.push(body);
 
       const vehicle = new YUKA.Vehicle();
       vehicle.position.set(startX, startY, startZ);
@@ -236,18 +260,101 @@ export class FishFlockAI {
 
       this.agents.push({
         id,
+        label,
         vehicle,
         root,
-        bodyGroup,
-        tailGroup,
-        dorsalFin,
-        finLeft,
-        finRight,
         arriveBehavior: arrive,
         wanderBehavior: wander,
-        phase: prng() * Math.PI * 2,
+        phase,
+        scale,
+        variant,
+        variantIdx,
+        globalIdx: i,
       });
     }
+
+    // Build 3 instanced koi body meshes (1 per skin pattern variant)
+    for (let v = 0; v < 3; v++) {
+      const vCount = variantPhases[v].length;
+      if (vCount === 0) continue;
+
+      const bodyGeo = baseBodyGeo.clone();
+      bodyGeo.setAttribute('aPhase', new THREE.InstancedBufferAttribute(new Float32Array(variantPhases[v]), 1));
+      bodyGeo.computeBoundsTree();
+      this.geometries.push(bodyGeo);
+
+      const skinTex = this.assets.getKoiSkinTexture(v, 256);
+      const bodyMat = new CustomShaderMaterial({
+        baseMaterial: THREE.MeshStandardMaterial,
+        map: skinTex,
+        roughness: 0.2,
+        metalness: 0.08,
+        uniforms: { uTime: { value: 0 } },
+        vertexShader: KOI_SWIM_VERT,
+      });
+      this.materials.push(bodyMat);
+      this.swimMats.push(bodyMat);
+
+      const inst = new THREE.InstancedMesh(bodyGeo, bodyMat, vCount);
+      inst.name = `koi-bodies-v${v}`;
+      inst.castShadow = true;
+      inst.frustumCulled = false;
+      inst.userData = {
+        interactableType: 'wildlife',
+        instanceEntityIds: variantIds[v],
+        instanceLabels: variantLabels[v],
+      };
+      this.bodyInsts.push(inst);
+      this.clickableMeshes.push(inst);
+      this.scene.add(inst);
+    }
+    baseBodyGeo.dispose();
+
+    // Build 1 shared instanced mesh for all koi fins & forked tails
+    allFinsGeo.setAttribute('aPhase', new THREE.InstancedBufferAttribute(allPhases, 1));
+    this.geometries.push(allFinsGeo);
+
+    const finMat = new CustomShaderMaterial({
+      baseMaterial: THREE.MeshStandardMaterial,
+      color: '#ffffff',
+      roughness: 0.32,
+      transparent: true,
+      opacity: 0.86,
+      side: THREE.DoubleSide,
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: KOI_SWIM_VERT,
+    });
+    this.materials.push(finMat);
+    this.swimMats.push(finMat);
+
+    this.finInst = new THREE.InstancedMesh(allFinsGeo, finMat, count);
+    this.finInst.name = 'koi-fins';
+    this.finInst.frustumCulled = false;
+    const finColors = ['#fff5eb', '#ffece0', '#fce3b6'].map((c) => new THREE.Color(c));
+    for (let i = 0; i < count; i++) {
+      this.finInst.setColorAt(i, finColors[i % finColors.length]);
+    }
+    if (this.finInst.instanceColor) this.finInst.instanceColor.needsUpdate = true;
+    this.scene.add(this.finInst);
+
+    // Build 1 shared instanced mesh for all koi eyes
+    eyesGeo.setAttribute('aPhase', new THREE.InstancedBufferAttribute(allPhases.slice(), 1));
+    this.geometries.push(eyesGeo);
+
+    const eyeMat = new CustomShaderMaterial({
+      baseMaterial: THREE.MeshStandardMaterial,
+      color: '#111317',
+      roughness: 0.1,
+      uniforms: { uTime: { value: 0 } },
+      vertexShader: KOI_SWIM_VERT,
+    });
+    this.materials.push(eyeMat);
+    this.swimMats.push(eyeMat);
+
+    this.eyeInst = new THREE.InstancedMesh(eyesGeo, eyeMat, count);
+    this.eyeInst.name = 'koi-eyes';
+    this.eyeInst.frustumCulled = false;
+    this.scene.add(this.eyeInst);
   }
 
   summonTo(x: number, z: number): void {
@@ -282,6 +389,10 @@ export class FishFlockAI {
       }
     }
 
+    for (const mat of this.swimMats) {
+      mat.uniforms.uTime.value = elapsed;
+    }
+
     for (const agent of this.agents) {
       const v = agent.vehicle;
       v.position.y = THREE.MathUtils.lerp(v.position.y, targetY, 0.15);
@@ -299,32 +410,57 @@ export class FishFlockAI {
       agent.root.position.set(v.position.x, v.position.y, v.position.z);
       agent.root.quaternion.set(v.rotation.x, v.rotation.y, v.rotation.z, v.rotation.w);
 
-      // S-curve swimming undulation across body, dorsal fin, pectoral fins, and forked tail
-      const speed = v.velocity.length();
-      const swimFreq = 5.5 + speed * 4.5;
-      const wave = Math.sin(elapsed * swimFreq + agent.phase);
-      agent.bodyGroup.rotation.y = wave * 0.09;
-      agent.dorsalFin.rotation.z = -wave * 0.16;
-      agent.tailGroup.rotation.y = Math.sin(elapsed * swimFreq + agent.phase - 0.85) * 0.46;
-      agent.finLeft.rotation.z = Math.sin(elapsed * swimFreq * 0.7 + agent.phase) * 0.26;
-      agent.finRight.rotation.z = -agent.finLeft.rotation.z;
+      this.dummy.position.copy(agent.root.position);
+      this.dummy.quaternion.copy(agent.root.quaternion);
+      this.dummy.scale.setScalar(agent.scale);
+      this.dummy.updateMatrix();
+
+      this.bodyInsts[agent.variant]?.setMatrixAt(agent.variantIdx, this.dummy.matrix);
+      this.finInst?.setMatrixAt(agent.globalIdx, this.dummy.matrix);
+      this.eyeInst?.setMatrixAt(agent.globalIdx, this.dummy.matrix);
     }
+
+    for (const inst of this.bodyInsts) {
+      inst.instanceMatrix.needsUpdate = true;
+    }
+    if (this.finInst) this.finInst.instanceMatrix.needsUpdate = true;
+    if (this.eyeInst) this.eyeInst.instanceMatrix.needsUpdate = true;
   }
 
   dispose(): void {
     for (const agent of this.agents) {
-      this.scene.remove(agent.root);
       this.entityManager.remove(agent.vehicle);
     }
     this.agents.length = 0;
     this.clickableMeshes.length = 0;
+
+    for (const inst of this.bodyInsts) {
+      this.scene.remove(inst);
+      inst.dispose();
+    }
+    this.bodyInsts = [];
+
+    if (this.finInst) {
+      this.scene.remove(this.finInst);
+      this.finInst.dispose();
+      this.finInst = null;
+    }
+    if (this.eyeInst) {
+      this.scene.remove(this.eyeInst);
+      this.eyeInst.dispose();
+      this.eyeInst = null;
+    }
+    this.swimMats = [];
 
     for (const obs of this.yukaObstacles) {
       this.entityManager.remove(obs);
     }
     this.yukaObstacles = [];
 
-    for (const g of this.geometries) g.dispose();
+    for (const g of this.geometries) {
+      g.disposeBoundsTree?.();
+      g.dispose();
+    }
     this.geometries = [];
     for (const m of this.materials) m.dispose();
     this.materials = [];

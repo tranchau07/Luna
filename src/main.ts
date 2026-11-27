@@ -59,12 +59,19 @@ async function bootstrap(): Promise<void> {
   rocks.init();
   foliage.init();
   architecture.init();
+  architecture.applyQuality(engine.getQualityProfile());
+
+  const combinedObstacles = [
+    ...rocks.obstacles,
+    ...foliage.obstacles,
+    ...architecture.obstacles,
+  ];
 
   const aiManager = new AIManager(
     engine.scene,
     crystalValleyBiome,
     engine.terrain.heightfield,
-    rocks.obstacles,
+    combinedObstacles,
     engine.assets,
     engine.bus,
   );
@@ -86,7 +93,6 @@ async function bootstrap(): Promise<void> {
     canvas,
     engine.cameraRig.camera,
     engine.bus,
-    architecture,
   );
 
   engine.registerSystem(aiManager);
@@ -110,9 +116,11 @@ async function bootstrap(): Promise<void> {
   ];
   picker.setTargets(interactables);
 
-  // Sync foliage instance counts when quality tier changes
+  // Sync foliage instance counts & lantern point lights when quality tier changes
   engine.bus.on('quality:change', () => {
-    foliage.applyQuality(engine.getQualityProfile());
+    const profile = engine.getQualityProfile();
+    foliage.applyQuality(profile);
+    architecture.applyQuality(profile);
   });
 
   const hud = new HudController(hudRoot, crystalValleyBiome, engine.bus);
@@ -132,6 +140,7 @@ async function bootstrap(): Promise<void> {
 
   if (window.__LUNA_DEBUG__) {
     window.__LUNA_DEBUG__.isReady = true;
+    window.__LUNA_DEBUG__.getGrassCount = () => foliage.getActiveGrassCount();
     const origDispose = window.__LUNA_DEBUG__.disposeScene;
     window.__LUNA_DEBUG__.disposeScene = () => {
       hud.dispose();

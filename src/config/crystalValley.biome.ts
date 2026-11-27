@@ -45,6 +45,24 @@ export const crystalValleyBiome: BiomeConfig = {
     birdCount: 6,
     butterflyCount: 12,
   },
+  landmarks: {
+    bridgeZ: 6.0,
+    steppingStonesZ: 16.5,
+    campsiteCenter: [13.0, 6.0],
+    lanternPositions: [
+      [-2.4, 4.3],
+      [9.6, 7.7],
+      [7.2, -3.2],
+      [10.8, 8.8],
+    ],
+    deerSpawnZones: [
+      [11.5, -14.0],
+      [15.5, -6.0],
+      [-12.5, 2.5],
+    ],
+    deerDrinkSpot: [8.5, -7.5],
+    waterfallPlungePos: [0.0, -24.5],
+  },
   defaultWeather: 'golden',
   weatherPresets: {
     morning: {

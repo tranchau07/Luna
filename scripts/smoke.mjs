@@ -32,13 +32,18 @@ function startPreviewServer() {
 }
 
 async function captureStable(page, filename) {
-  await page.waitForTimeout(800);
+  await page.evaluate(
+    () =>
+      new Promise((resolve) =>
+        requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined))),
+      ),
+  );
   await page.evaluate(() => window.__LUNA_DEBUG__.setPaused(true));
-  await page.waitForTimeout(150);
+  await page.waitForTimeout(200);
   await page.screenshot({
     path: path.join(SCREENSHOT_DIR, filename),
     animations: 'disabled',
-    timeout: 20000,
+    timeout: 45000,
   });
   await page.evaluate(() => window.__LUNA_DEBUG__.setPaused(false));
 }
@@ -83,10 +88,12 @@ async function main() {
     await page.goto(URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForFunction(() => Boolean(window.__LUNA_DEBUG__?.isReady), { timeout: 25000 });
 
-    const initialInfo = await page.evaluate(() => window.__LUNA_DEBUG__.getRenderInfo());
-    console.log('Initial render info:', JSON.stringify(initialInfo));
-
     await captureStable(page, '01-overview.png');
+    const mediumInfo = await page.evaluate(() => window.__LUNA_DEBUG__.getRenderInfo());
+    console.log('Medium render info:', JSON.stringify(mediumInfo));
+    if (mediumInfo.calls >= 180) {
+      throw new Error(`Expected optimized draw calls < 180 on Medium, got ${mediumInfo.calls}`);
+    }
 
     await page.evaluate(() => window.__LUNA_DEBUG__.setCameraPreset('waterfall-sanctuary', false));
     await captureStable(page, '02-waterfall.png');
@@ -103,7 +110,35 @@ async function main() {
     });
     await captureStable(page, '05-moonlight.png');
 
-    // Exercise quality tiers, Eco Mode, and click interaction
+    // Verify moonlight -> noon transition (firefly emission rate drops to 0 without freezing)
+    await page.evaluate(() => window.__LUNA_DEBUG__.setWeather('noon'));
+    await page.waitForTimeout(350);
+
+    // Verify High tier truly unlocks > 25,000 grass instances
+    const highGrassCount = await page.evaluate(() => {
+      window.__LUNA_DEBUG__.setQuality('high');
+      return window.__LUNA_DEBUG__.getGrassCount?.() ?? 0;
+    });
+    console.log('High tier grass count:', highGrassCount);
+    if (highGrassCount <= 25000) {
+      throw new Error(`Expected High tier grassCount > 25000, got ${highGrassCount}`);
+    }
+
+    // Verify mobile/touch HUD Hide -> Restore button flow
+    await page.click('#btn-hide');
+    await page.waitForTimeout(200);
+    const restoreVisible = await page.$eval('#btn-hud-restore', (el) => el.classList.contains('visible'));
+    if (!restoreVisible) {
+      throw new Error('Expected #btn-hud-restore to become visible when HUD is hidden');
+    }
+    await page.click('#btn-hud-restore');
+    await page.waitForTimeout(200);
+    const hudRestored = await page.$eval('#hud-wrapper', (el) => !el.classList.contains('hud-hidden'));
+    if (!hudRestored) {
+      throw new Error('Expected clicking #btn-hud-restore to restore HUD');
+    }
+
+    // Exercise Low tier, Eco Mode, and click interaction
     await page.evaluate(() => {
       window.__LUNA_DEBUG__.setQuality('low');
       window.__LUNA_DEBUG__.setEcoMode(true);

@@ -33,6 +33,7 @@ export class SkyAtmosphere implements IWorldSystem {
   private currentMode: WeatherMode;
   private targetPreset: WeatherPreset;
   private currentExposure = 1.05;
+  private exposureOverride: number | null = null;
   private sunDirection = new THREE.Vector3(0.4, 0.5, -0.7).normalize();
   private fog: THREE.FogExp2;
 
@@ -219,11 +220,28 @@ export class SkyAtmosphere implements IWorldSystem {
   }
 
   getExposure(): number {
-    return this.currentExposure;
+    return this.exposureOverride ?? this.currentExposure;
+  }
+
+  setExposureOverride(value: number | null): void {
+    this.exposureOverride = value;
   }
 
   getSunDirection(): THREE.Vector3 {
     return this.sunDirection;
+  }
+
+  rebuildEnvironmentMaps(): void {
+    for (const rt of this.envCache.values()) {
+      rt.dispose();
+    }
+    this.envCache.clear();
+    if (this.pmremGenerator) {
+      this.pmremGenerator.dispose();
+    }
+    this.pmremGenerator = new THREE.PMREMGenerator(this.renderer);
+    this.pmremGenerator.compileEquirectangularShader();
+    this.applyWeatherImmediate(this.currentMode);
   }
 
   applyQuality(profile: QualityProfile): void {
@@ -242,6 +260,7 @@ export class SkyAtmosphere implements IWorldSystem {
     if (!preset) return;
     this.currentMode = mode;
     this.targetPreset = preset;
+    this.exposureOverride = null;
     this.applyWeatherImmediate(mode);
   }
 

@@ -31,7 +31,7 @@ export class AIManager implements IWorldSystem {
   ) {
     this.bus = bus;
     this.fishFlock = new FishFlockAI(scene, biome, this.entityManager, obstacles, assets);
-    this.wildlife = new WildlifeFSM(scene, biome, heightfield, this.entityManager, assets);
+    this.wildlife = new WildlifeFSM(scene, biome, heightfield, this.entityManager, obstacles, assets, bus);
   }
 
   init(): void {

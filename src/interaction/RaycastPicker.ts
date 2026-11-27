@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import type { IWorldSystem } from '../core/IWorldSystem';
 import type { EventBus } from '../core/EventBus';
-import type { ArchitectureSystem } from '../world/ArchitectureSystem';
 
 /**
  * BVH-accelerated pointer raycaster handling water ripples & koi summoning,
@@ -13,7 +12,6 @@ export class RaycastPicker implements IWorldSystem {
   private readonly domElement: HTMLElement;
   private readonly camera: THREE.Camera;
   private readonly bus: EventBus;
-  private readonly architecture: ArchitectureSystem;
 
   private raycaster = new THREE.Raycaster();
   private pointerDownPos = new THREE.Vector2();
@@ -28,12 +26,10 @@ export class RaycastPicker implements IWorldSystem {
     domElement: HTMLElement,
     camera: THREE.Camera,
     bus: EventBus,
-    architecture: ArchitectureSystem,
   ) {
     this.domElement = domElement;
     this.camera = camera;
     this.bus = bus;
-    this.architecture = architecture;
     this.raycaster.firstHitOnly = true;
 
     this.onPointerDownBound = (e) => {
@@ -76,6 +72,8 @@ export class RaycastPicker implements IWorldSystem {
       lanternId?: number;
       entityId?: string;
       label?: string;
+      instanceEntityIds?: string[];
+      instanceLabels?: string[];
     };
 
     const p: [number, number, number] = [hit.point.x, hit.point.y, hit.point.z];
@@ -88,25 +86,25 @@ export class RaycastPicker implements IWorldSystem {
         break;
       case 'lantern':
         if (typeof meta.lanternId === 'number') {
-          const lit = this.architecture.toggleLantern(meta.lanternId);
-          this.bus.emit('lantern:toggle', { id: meta.lanternId, lit });
-          this.bus.emit('ui:toast', {
-            message: lit ? 'Stone lantern lit' : 'Stone lantern extinguished',
-          });
+          this.bus.emit('lantern:toggle', { id: meta.lanternId });
         }
         break;
       case 'tree':
         this.bus.emit('tree:shake', { position: p });
         this.bus.emit('ui:toast', { message: 'Breeze shook autumn leaves' });
         break;
-      case 'wildlife':
-        if (meta.entityId) {
-          this.bus.emit('camera:follow', { entityId: meta.entityId, label: meta.label });
+      case 'wildlife': {
+        const idx = typeof hit.instanceId === 'number' ? hit.instanceId : -1;
+        const entityId = (idx >= 0 ? meta.instanceEntityIds?.[idx] : undefined) ?? meta.entityId;
+        const label = (idx >= 0 ? meta.instanceLabels?.[idx] : undefined) ?? meta.label;
+        if (entityId) {
+          this.bus.emit('camera:follow', { entityId, label });
           this.bus.emit('ui:toast', {
-            message: `Following ${meta.label ?? meta.entityId} (Esc or preset to exit)`,
+            message: `Following ${label ?? entityId} (Esc or preset to exit)`,
           });
         }
         break;
+      }
       case 'terrain':
         this.bus.emit('camera:follow', { entityId: null });
         break;
