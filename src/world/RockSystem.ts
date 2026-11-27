@@ -182,8 +182,9 @@ export class RockSystem implements IWorldSystem {
         x = streamX + side * (2.1 + prng() * 4.2);
       }
 
-      // Keep clear of bridge at z = 6
-      if (Math.abs(z - 6) < 3.4 && Math.abs(x - this.heightfield.getStreamCenterX(6)) < 6) {
+      // Keep clear of bridge at configured bridgeZ
+      const { bridgeZ } = this.biome.landmarks;
+      if (Math.abs(z - bridgeZ) < 3.4 && Math.abs(x - this.heightfield.getStreamCenterX(bridgeZ)) < 6) {
         continue;
       }
 
@@ -193,11 +194,12 @@ export class RockSystem implements IWorldSystem {
     }
 
     // Scattered valley slope rocks
+    const [campX, campZ] = this.biome.landmarks.campsiteCenter;
     for (let i = 0; i < 28; i++) {
       const x = (prng() - 0.5) * 86;
       const z = (prng() - 0.5) * 86;
       if (this.heightfield.isWaterAt(x, z)) continue;
-      if (Math.hypot(x - 13, z - 6) < 6.5) continue;
+      if (Math.hypot(x - campX, z - campZ) < 6.5) continue;
       const y = this.heightfield.getHeightAt(x, z) - 0.25;
       const s = 0.8 + prng() * 1.8;
       pushRock(x, y, z, s, s * 0.72, s * 1.15, i % 3, false);
@@ -212,6 +214,7 @@ export class RockSystem implements IWorldSystem {
       inst.receiveShadow = true;
       groupItems.forEach((item, idx) => inst.setMatrixAt(idx, item.matrix));
       inst.instanceMatrix.needsUpdate = true;
+      inst.computeBoundingSphere();
       this.instancedMeshes.push(inst);
       this.scene.add(inst);
     }
@@ -286,6 +289,7 @@ export class RockSystem implements IWorldSystem {
     pebbleInst.count = placed;
     pebbleInst.instanceMatrix.needsUpdate = true;
     if (pebbleInst.instanceColor) pebbleInst.instanceColor.needsUpdate = true;
+    pebbleInst.computeBoundingSphere();
 
     this.instancedMeshes.push(pebbleInst);
     this.scene.add(pebbleInst);

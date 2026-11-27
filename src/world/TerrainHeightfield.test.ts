@@ -18,9 +18,33 @@ describe('TerrainHeightfield', () => {
   });
 
   it('carves the koi pool below waterLevel and raises the waterfall cliff', () => {
-    const field = new TerrainHeightfield(crystalValleyBiome.terrain, crystalValleyBiome.seed);
+    const field = new TerrainHeightfield(
+      crystalValleyBiome.terrain,
+      crystalValleyBiome.seed,
+      crystalValleyBiome.landmarks,
+    );
     const [px, pz] = crystalValleyBiome.terrain.poolCenter;
     expect(field.getHeightAt(px, pz)).toBeLessThan(crystalValleyBiome.terrain.waterLevel - 0.8);
     expect(field.getHeightAt(12, -35)).toBeGreaterThan(crystalValleyBiome.terrain.waterLevel + 5.0);
+  });
+
+  it('flattens terrain around configured campsiteCenter landmark', () => {
+    const defaultField = new TerrainHeightfield(
+      crystalValleyBiome.terrain,
+      crystalValleyBiome.seed,
+      crystalValleyBiome.landmarks,
+    );
+    const customLandmarks = {
+      ...crystalValleyBiome.landmarks,
+      campsiteCenter: [18.0, 10.0] as [number, number],
+    };
+    const customField = new TerrainHeightfield(
+      crystalValleyBiome.terrain,
+      crystalValleyBiome.seed,
+      customLandmarks,
+    );
+    // Moving campsiteCenter to (18, 10) must noticeably alter elevation and reduce slope there
+    expect(customField.getHeightAt(18.0, 10.0)).not.toBeCloseTo(defaultField.getHeightAt(18.0, 10.0), 1);
+    expect(customField.getSlopeAt(18.0, 10.0)).toBeLessThan(defaultField.getSlopeAt(18.0, 10.0));
   });
 });

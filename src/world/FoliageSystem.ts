@@ -5,9 +5,10 @@ import CustomShaderMaterial from 'three-custom-shader-material/vanilla';
 import type { IWorldSystem } from '../core/IWorldSystem';
 import type { AssetLoader } from '../core/AssetLoader';
 import type { BiomeConfig } from '../config/BiomeConfig';
-import type { QualityProfile } from '../core/QualityConfig';
+import { QUALITY_PROFILES, type QualityProfile } from '../core/QualityConfig';
 import type { EventBus } from '../core/EventBus';
 import type { TerrainHeightfield } from './TerrainHeightfield';
+import type { RockObstacle } from './RockSystem';
 
 interface TreePlacement {
   x: number;
@@ -27,6 +28,7 @@ export class FoliageSystem implements IWorldSystem {
   readonly name = 'FoliageSystem';
   readonly treePlacements: TreePlacement[] = [];
   readonly interactiveTrees: THREE.Object3D[] = [];
+  readonly obstacles: RockObstacle[] = [];
 
   private readonly scene: THREE.Scene;
   private readonly biome: BiomeConfig;
@@ -37,17 +39,17 @@ export class FoliageSystem implements IWorldSystem {
   private grassMesh: THREE.InstancedMesh | null = null;
   private grassMat: CustomShaderMaterial | null = null;
   private grassGeo: THREE.BufferGeometry | null = null;
-  private maxGrassCount = 25000;
+  private maxGrassCount = QUALITY_PROFILES.high.grassCount;
 
   private fernMesh: THREE.InstancedMesh | null = null;
   private fernMat: CustomShaderMaterial | null = null;
   private fernGeo: THREE.BufferGeometry | null = null;
-  private maxFernCount = 480;
+  private maxFernCount = QUALITY_PROFILES.high.fernCount;
 
   private flowerMesh: THREE.InstancedMesh | null = null;
   private flowerMat: CustomShaderMaterial | null = null;
   private flowerGeo: THREE.BufferGeometry | null = null;
-  private maxFlowerCount = 850;
+  private maxFlowerCount = QUALITY_PROFILES.high.flowerCount;
 
   private reedMesh: THREE.InstancedMesh | null = null;
   private reedMat: CustomShaderMaterial | null = null;
@@ -79,7 +81,9 @@ export class FoliageSystem implements IWorldSystem {
     this.heightfield = heightfield;
     this.assets = assets;
     this.bus = bus;
-    this.maxGrassCount = 25000;
+    this.maxGrassCount = QUALITY_PROFILES.high.grassCount;
+    this.maxFernCount = QUALITY_PROFILES.high.fernCount;
+    this.maxFlowerCount = QUALITY_PROFILES.high.flowerCount;
     this.currentProfile = initialProfile;
   }
 
@@ -97,6 +101,10 @@ export class FoliageSystem implements IWorldSystem {
       this.shakeOrigin.set(position[0], position[1], position[2]);
       this.shakePulse = 1.0;
     });
+  }
+
+  getActiveGrassCount(): number {
+    return this.grassMesh?.count ?? 0;
   }
 
   applyQuality(profile: QualityProfile): void {
@@ -181,6 +189,8 @@ export class FoliageSystem implements IWorldSystem {
 
       const branchGeo = tree.branchesMesh.geometry.clone();
       const leafGeo = tree.leavesMesh.geometry.clone();
+      branchGeo.computeBoundsTree();
+      leafGeo.computeBoundsTree();
 
       const origBranchMat = Array.isArray(tree.branchesMesh.material)
         ? tree.branchesMesh.material[0]
@@ -210,19 +220,34 @@ export class FoliageSystem implements IWorldSystem {
           uTime: { value: 0 },
           uWind: { value: this.biome.foliage.windStrength },
           uSssColor: { value: sssTint },
+          uShakeOrigin: { value: this.shakeOrigin },
+          uShakePulse: { value: 0 },
         },
         vertexShader: /* glsl */ `
           uniform float uTime;
           uniform float uWind;
+          uniform vec3 uShakeOrigin;
+          uniform float uShakePulse;
           varying vec3 vLeafWorldPos;
           varying float vCanopyHeight;
           void main() {
             vec3 p = position;
+            vec2 instXZ = vec2(0.0);
+            #ifdef USE_INSTANCING
+              instXZ = instanceMatrix[3].xz;
+            #endif
+            float phase = instXZ.x * 0.19 + instXZ.y * 0.23;
             vCanopyHeight = clamp(p.y / 14.0, 0.0, 1.0);
-            float sway = sin(uTime * 1.6 + p.x * 0.7 + p.y * 0.4) * 0.1 * uWind;
-            float flutter = sin(uTime * 4.2 + p.x * 2.5 + p.z * 2.5) * 0.025 * uWind;
+            float sway = sin(uTime * 1.6 + phase + p.x * 0.7 + p.y * 0.4) * 0.1 * uWind;
+            float flutter = sin(uTime * 4.2 + phase * 1.7 + p.x * 2.5 + p.z * 2.5) * 0.025 * uWind;
             p.x += sway + flutter;
-            p.z += cos(uTime * 1.25 + p.z * 0.6) * 0.065 * uWind;
+            p.z += cos(uTime * 1.25 + phase + p.z * 0.6) * 0.065 * uWind;
+            if (uShakePulse > 0.01) {
+              float d = distance(instXZ, uShakeOrigin.xz);
+              float gust = sin(uTime * 18.0 + p.y * 1.4) * exp(-d * 0.22) * uShakePulse * 0.48;
+              p.x += gust;
+              p.z += gust * 0.6;
+            }
             csm_Position = p;
             vec4 localPos = vec4(p, 1.0);
             #ifdef USE_INSTANCING
@@ -274,6 +299,7 @@ export class FoliageSystem implements IWorldSystem {
     }
 
     // Collect valid valley placements (avoid stream, pool, bridge, and campsite center)
+    const [campX, campZ] = this.biome.landmarks.campsiteCenter;
     const placed: TreePlacement[] = [];
     const fixedHero = [
       { x: -12.5, z: -18.5, variant: 0, scale: 0.34 },
@@ -292,7 +318,7 @@ export class FoliageSystem implements IWorldSystem {
       const z = (prng() - 0.5) * 96;
       if (this.heightfield.isWaterAt(x, z)) continue;
       if (this.heightfield.getSlopeAt(x, z) > 0.36) continue;
-      if (Math.hypot(x - 13, z - 6) < 8.0) continue;
+      if (Math.hypot(x - campX, z - campZ) < 8.0) continue;
       if (Math.abs(x - this.heightfield.getStreamCenterX(z)) < 4.8 && z > -26) continue;
       // Keep primary overview, waterfall, and bridge camera sightline corridors unobstructed
       if (x > 2 && x < 28 && z > -2 && z < 30) continue;
@@ -308,6 +334,9 @@ export class FoliageSystem implements IWorldSystem {
     }
 
     this.treePlacements.push(...placed);
+    for (const p of placed) {
+      this.obstacles.push({ x: p.x, y: p.y + 1.0, z: p.z, radius: 0.85 + p.scale * 1.4 });
+    }
 
     const dummy = new THREE.Object3D();
     for (let v = 0; v < variants.length; v++) {
@@ -336,6 +365,8 @@ export class FoliageSystem implements IWorldSystem {
       });
       branchInst.instanceMatrix.needsUpdate = true;
       leafInst.instanceMatrix.needsUpdate = true;
+      branchInst.computeBoundingSphere();
+      leafInst.computeBoundingSphere();
 
       this.treeInstancedMeshes.push(branchInst, leafInst);
       this.interactiveTrees.push(branchInst, leafInst);
@@ -363,21 +394,31 @@ export class FoliageSystem implements IWorldSystem {
       cPos.setXYZ(i, x * scaleR + arch, y, z * scaleR);
     }
     culmGeo.computeVertexNormals();
+    culmGeo.computeBoundsTree();
 
     const culmMat = new CustomShaderMaterial({
       baseMaterial: THREE.MeshStandardMaterial,
       color: '#4e7a36',
       roughness: 0.42,
       metalness: 0.04,
-      uniforms: { uTime: { value: 0 } },
+      uniforms: {
+        uTime: { value: 0 },
+        uWind: { value: this.biome.foliage.windStrength },
+      },
       vertexShader: /* glsl */ `
         uniform float uTime;
+        uniform float uWind;
         varying float vCulmY;
         void main() {
           vCulmY = position.y;
           vec3 p = position;
+          vec2 instXZ = vec2(0.0);
+          #ifdef USE_INSTANCING
+            instXZ = instanceMatrix[3].xz;
+          #endif
+          float phase = instXZ.x * 0.24 + instXZ.y * 0.18;
           float h = clamp(p.y / 8.2, 0.0, 1.0);
-          p.x += sin(uTime * 1.4 + p.y * 0.4) * h * h * 0.32;
+          p.x += sin(uTime * 1.4 + phase + p.y * 0.4) * h * h * 0.32 * uWind;
           csm_Position = p;
         }
       `,
@@ -394,12 +435,35 @@ export class FoliageSystem implements IWorldSystem {
 
     const leafTex = this.assets.getFoliageAlphaTexture('bamboo-leaf', 192);
     const canopyGeo = new THREE.PlaneGeometry(1.9, 1.9);
-    const canopyMat = new THREE.MeshStandardMaterial({
+    const canopyMat = new CustomShaderMaterial({
+      baseMaterial: THREE.MeshStandardMaterial,
       map: leafTex,
       alphaTest: 0.36,
       side: THREE.DoubleSide,
       color: '#5c943e',
       roughness: 0.7,
+      uniforms: {
+        uTime: { value: 0 },
+        uWind: { value: this.biome.foliage.windStrength },
+      },
+      vertexShader: /* glsl */ `
+        uniform float uTime;
+        uniform float uWind;
+        void main() {
+          vec3 p = position;
+          vec2 instXZ = vec2(0.0);
+          #ifdef USE_INSTANCING
+            instXZ = instanceMatrix[3].xz;
+          #endif
+          float phase = instXZ.x * 0.24 + instXZ.y * 0.18;
+          // Match upper culm sway amplitude so leaves stay coupled to swaying culms
+          float culmSway = sin(uTime * 1.4 + phase + 2.4) * 0.22 * uWind;
+          float flutter = sin(uTime * 3.8 + phase + position.x * 3.0) * 0.04 * uWind;
+          p.x += culmSway + flutter;
+          p.z += cos(uTime * 1.3 + phase) * 0.06 * uWind;
+          csm_Position = p;
+        }
+      `,
     });
 
     const culms = new THREE.InstancedMesh(culmGeo, culmMat, totalCulms);
@@ -418,6 +482,12 @@ export class FoliageSystem implements IWorldSystem {
       const cx = -13 - prng() * 19;
       const cz = -22 + prng() * 44;
       if (this.heightfield.isWaterAt(cx, cz)) continue;
+      this.obstacles.push({
+        x: cx,
+        y: this.heightfield.getHeightAt(cx, cz) + 1.0,
+        z: cz,
+        radius: 2.1,
+      });
 
       for (let k = 0; k < bambooPerCluster; k++) {
         const bx = cx + (prng() - 0.5) * 3.4;
@@ -445,6 +515,8 @@ export class FoliageSystem implements IWorldSystem {
     leaves.count = leafIdx;
     culms.instanceMatrix.needsUpdate = true;
     leaves.instanceMatrix.needsUpdate = true;
+    culms.computeBoundingSphere();
+    leaves.computeBoundingSphere();
 
     this.bambooCulms = culms;
     this.bambooLeaves = leaves;
@@ -560,6 +632,7 @@ export class FoliageSystem implements IWorldSystem {
     mesh.name = 'valley-grass';
     mesh.receiveShadow = true;
 
+    const [campX, campZ] = this.biome.landmarks.campsiteCenter;
     const dummy = new THREE.Object3D();
     let placed = 0;
     let attempts = 0;
@@ -572,8 +645,8 @@ export class FoliageSystem implements IWorldSystem {
       const z = (prng() - 0.5) * spread - (nearValley ? 2 : 0);
 
       // Keep inside of tent & stone campfire ring clear
-      if (Math.hypot(x - 15.5, z - 4.3) < 2.15) continue;
-      if (Math.hypot(x - 13.0, z - 6.0) < 1.35) continue;
+      if (Math.hypot(x - (campX + 2.5), z - (campZ - 1.7)) < 2.15) continue;
+      if (Math.hypot(x - campX, z - campZ) < 1.35) continue;
 
       const y = this.heightfield.getHeightAt(x, z);
       if (y < this.biome.terrain.waterLevel + 0.1) continue;
@@ -588,8 +661,10 @@ export class FoliageSystem implements IWorldSystem {
     }
 
     this.maxGrassCount = placed;
-    mesh.count = Math.min(placed, this.currentProfile.grassCount);
+    mesh.count = placed;
     mesh.instanceMatrix.needsUpdate = true;
+    mesh.computeBoundingSphere();
+    mesh.count = Math.min(placed, this.currentProfile.grassCount);
 
     this.grassGeo = clumpGeo;
     this.grassMesh = mesh;
@@ -640,8 +715,13 @@ export class FoliageSystem implements IWorldSystem {
         uniform float uWind;
         void main() {
           vec3 p = position;
+          vec2 instXZ = vec2(0.0);
+          #ifdef USE_INSTANCING
+            instXZ = instanceMatrix[3].xz;
+          #endif
+          float phase = instXZ.x * 0.31 + instXZ.y * 0.27;
           float radial = length(p.xz);
-          p.y += sin(uTime * 2.1 + p.x * 3.0 + p.z * 3.0) * radial * 0.07 * uWind;
+          p.y += sin(uTime * 2.1 + phase + p.x * 3.0 + p.z * 3.0) * radial * 0.07 * uWind;
           csm_Position = p;
         }
       `,
@@ -669,7 +749,9 @@ export class FoliageSystem implements IWorldSystem {
       this.fernMesh.setMatrixAt(fPlaced++, dummy.matrix);
     }
     this.maxFernCount = fPlaced;
+    this.fernMesh.count = fPlaced;
     this.fernMesh.instanceMatrix.needsUpdate = true;
+    this.fernMesh.computeBoundingSphere();
     this.fernGeo = fernGeo;
     this.scene.add(this.fernMesh);
 
@@ -697,8 +779,13 @@ export class FoliageSystem implements IWorldSystem {
         uniform float uTime;
         void main() {
           vec3 p = position;
+          vec2 instXZ = vec2(0.0);
+          #ifdef USE_INSTANCING
+            instXZ = instanceMatrix[3].xz;
+          #endif
+          float phase = instXZ.x * 0.35 + instXZ.y * 0.29;
           float h = clamp(p.y / 0.58, 0.0, 1.0);
-          p.x += sin(uTime * 2.4 + p.z * 4.0) * h * 0.045;
+          p.x += sin(uTime * 2.4 + phase + p.z * 4.0) * h * 0.045;
           csm_Position = p;
         }
       `,
@@ -725,8 +812,10 @@ export class FoliageSystem implements IWorldSystem {
       flPlaced++;
     }
     this.maxFlowerCount = flPlaced;
+    this.flowerMesh.count = flPlaced;
     this.flowerMesh.instanceMatrix.needsUpdate = true;
     if (this.flowerMesh.instanceColor) this.flowerMesh.instanceColor.needsUpdate = true;
+    this.flowerMesh.computeBoundingSphere();
     this.flowerGeo = flowerGeo;
     this.scene.add(this.flowerMesh);
   }
@@ -826,6 +915,7 @@ export class FoliageSystem implements IWorldSystem {
 
     reedMesh.count = placed;
     reedMesh.instanceMatrix.needsUpdate = true;
+    reedMesh.computeBoundingSphere();
 
     this.reedGeo = reedGeo;
     this.reedMesh = reedMesh;
@@ -852,6 +942,9 @@ export class FoliageSystem implements IWorldSystem {
     for (const mat of this.treeMats) {
       if (mat instanceof CustomShaderMaterial && mat.uniforms?.uTime) {
         mat.uniforms.uTime.value = elapsed;
+        if (mat.uniforms.uShakePulse) {
+          mat.uniforms.uShakePulse.value = this.shakePulse;
+        }
       }
     }
     for (const mat of this.bambooMats) {
@@ -872,8 +965,12 @@ export class FoliageSystem implements IWorldSystem {
     }
     this.treeInstancedMeshes = [];
     this.interactiveTrees.length = 0;
+    this.obstacles.length = 0;
 
-    for (const geo of this.treeGeos) geo.dispose();
+    for (const geo of this.treeGeos) {
+      geo.disposeBoundsTree?.();
+      geo.dispose();
+    }
     this.treeGeos = [];
     for (const mat of this.treeMats) mat.dispose();
     this.treeMats = [];
@@ -888,7 +985,10 @@ export class FoliageSystem implements IWorldSystem {
       this.bambooLeaves.dispose();
       this.bambooLeaves = null;
     }
-    for (const g of this.bambooGeos) g.dispose();
+    for (const g of this.bambooGeos) {
+      g.disposeBoundsTree?.();
+      g.dispose();
+    }
     this.bambooGeos = [];
     for (const m of this.bambooMats) m.dispose();
     this.bambooMats = [];

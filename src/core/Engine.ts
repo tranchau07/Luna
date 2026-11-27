@@ -21,6 +21,7 @@ export interface DebugBridge {
   getRenderInfo: () => { geometries: number; textures: number; calls: number; triangles: number };
   getPresets: () => Array<{ id: string; label: string }>;
   getWeatherModes: () => WeatherMode[];
+  getGrassCount?: () => number;
   setCameraPreset: (id: string, transition?: boolean) => void;
   setWeather: (mode: WeatherMode) => void;
   setQuality: (tier: QualityTier) => void;
@@ -129,7 +130,12 @@ export class Engine {
       this.stopLoop();
     };
     this.onContextRestoredBound = () => {
+      if (this.disposed) return;
+      this.sky.rebuildEnvironmentMaps();
+      this.postPipeline.rebuildPasses(this.qualityProfile);
+      this.applyQualityAndSize();
       this.lastTimeMs = performance.now();
+      this.lastRenderMs = this.lastTimeMs;
       this.startLoop();
     };
 
@@ -246,6 +252,8 @@ export class Engine {
         sys.update(dt, this.elapsedSec);
       }
 
+      this.renderer.info.autoReset = false;
+      this.renderer.info.reset();
       this.postPipeline.render(dt);
       this.rafId = requestAnimationFrame(tick);
     };

@@ -14,7 +14,8 @@ export interface EngineEventMap {
   'water:ripple': { position: [number, number, number]; intensity?: number };
   'fish:summon': { position: [number, number, number] };
   'tree:shake': { position: [number, number, number] };
-  'lantern:toggle': { id: number; lit: boolean };
+  'lantern:toggle': { id: number; lit?: boolean };
+  'pomodoro:complete': { nextMode: 'focus' | 'break' };
   'ui:toggleHud': { visible?: boolean };
   'ui:toast': { message: string };
 }

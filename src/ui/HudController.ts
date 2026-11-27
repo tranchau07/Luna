@@ -3,8 +3,9 @@ import type { BiomeConfig } from '../config/BiomeConfig';
 import type { QualityTier } from '../core/QualityConfig';
 
 /**
- * Minimalist Glassmorphism Zen HUD with Pomodoro 25/5 timer, camera presets,
- * weather switcher, quality/eco toggles, ambient audio toggle, and [H] hide shortcut.
+ * Minimalist Glassmorphism Zen HUD with drift-free Pomodoro 25/5 timer, camera presets,
+ * weather switcher, quality/eco toggles, ambient audio toggle, [H] hide shortcut,
+ * and touch-accessible HUD restore button.
  */
 export class HudController {
   private readonly root: HTMLElement;
@@ -18,9 +19,10 @@ export class HudController {
   private activeWeather: WeatherMode;
   private activePreset: string;
 
-  // Pomodoro state (25 min focus / 5 min break)
+  // Drift-free Pomodoro state (25 min focus / 5 min break)
   private pomoMode: 'focus' | 'break' = 'focus';
   private pomoSecondsLeft = 25 * 60;
+  private pomoEndTimeMs: number | null = null;
   private pomoRunning = false;
   private pomoTimerId: number | null = null;
 
@@ -29,10 +31,14 @@ export class HudController {
   private pomoTimeEl: HTMLElement | null = null;
   private pomoModeEl: HTMLElement | null = null;
   private pomoToggleBtn: HTMLButtonElement | null = null;
+  private qualityBtn: HTMLButtonElement | null = null;
+  private ecoBtn: HTMLButtonElement | null = null;
   private wrapperEl: HTMLElement | null = null;
+  private restoreBtn: HTMLButtonElement | null = null;
 
   private unsubs: Array<() => void> = [];
   private onKeyDownBound: (e: KeyboardEvent) => void;
+  private onVisibilityBound: () => void;
 
   constructor(root: HTMLElement, biome: BiomeConfig, bus: EventBus) {
     this.root = root;
@@ -45,18 +51,21 @@ export class HudController {
         this.toggleHud();
       }
     };
+    this.onVisibilityBound = () => {
+      if (!document.hidden && this.pomoRunning) {
+        this.tickPomodoro();
+      }
+    };
   }
 
   init(): void {
     this.render();
     window.addEventListener('keydown', this.onKeyDownBound);
+    document.addEventListener('visibilitychange', this.onVisibilityBound);
 
     this.unsubs.push(
       this.bus.on('ui:toggleHud', ({ visible }) => {
-        this.hudVisible = visible ?? !this.hudVisible;
-        if (this.wrapperEl) {
-          this.wrapperEl.classList.toggle('hud-hidden', !this.hudVisible);
-        }
+        this.setHudVisible(visible ?? !this.hudVisible);
       }),
       this.bus.on('ui:toast', ({ message }) => this.showToast(message)),
       this.bus.on('weather:change', ({ mode }) => {
@@ -67,16 +76,31 @@ export class HudController {
         this.activePreset = presetId;
         this.syncActiveButtons();
       }),
+      this.bus.on('quality:change', ({ tier }) => {
+        this.qualityTier = tier;
+        this.syncQualityAndEcoButtons();
+      }),
+      this.bus.on('eco:toggle', ({ enabled }) => {
+        this.ecoEnabled = enabled;
+        this.syncQualityAndEcoButtons();
+      }),
     );
 
-    this.pomoTimerId = window.setInterval(() => this.tickPomodoro(), 1000);
+    this.pomoTimerId = window.setInterval(() => this.tickPomodoro(), 500);
   }
 
-  private toggleHud(): void {
-    this.hudVisible = !this.hudVisible;
+  private setHudVisible(visible: boolean): void {
+    this.hudVisible = visible;
     if (this.wrapperEl) {
       this.wrapperEl.classList.toggle('hud-hidden', !this.hudVisible);
     }
+    if (this.restoreBtn) {
+      this.restoreBtn.classList.toggle('visible', !this.hudVisible);
+    }
+  }
+
+  private toggleHud(): void {
+    this.setHudVisible(!this.hudVisible);
   }
 
   private render(): void {
@@ -136,13 +160,19 @@ export class HudController {
           </div>
         </div>
       </div>
+      <button class="hud-restore-btn" id="btn-hud-restore" title="Restore HUD (H)" aria-label="Restore HUD">Show UI</button>
     `;
 
     this.wrapperEl = this.root.querySelector('#hud-wrapper');
+    this.restoreBtn = this.root.querySelector('#btn-hud-restore');
     this.toastEl = this.root.querySelector('#hud-toast');
     this.pomoTimeEl = this.root.querySelector('#pomo-time');
     this.pomoModeEl = this.root.querySelector('#pomo-mode');
     this.pomoToggleBtn = this.root.querySelector('#pomo-toggle');
+    this.qualityBtn = this.root.querySelector('#btn-quality');
+    this.ecoBtn = this.root.querySelector('#btn-eco');
+
+    this.restoreBtn?.addEventListener('click', () => this.setHudVisible(true));
 
     this.root.querySelectorAll<HTMLButtonElement>('[data-preset]').forEach((btn) => {
       btn.addEventListener('click', () => {
@@ -162,19 +192,17 @@ export class HudController {
       });
     });
 
-    const qualityBtn = this.root.querySelector<HTMLButtonElement>('#btn-quality');
-    qualityBtn?.addEventListener('click', () => {
+    this.qualityBtn?.addEventListener('click', () => {
       const order: QualityTier[] = ['low', 'medium', 'high'];
       const next = order[(order.indexOf(this.qualityTier) + 1) % order.length];
       this.qualityTier = next;
-      qualityBtn.textContent = `Quality: ${next[0].toUpperCase()}${next.slice(1)}`;
+      this.syncQualityAndEcoButtons();
       this.bus.emit('quality:change', { tier: next });
     });
 
-    const ecoBtn = this.root.querySelector<HTMLButtonElement>('#btn-eco');
-    ecoBtn?.addEventListener('click', () => {
+    this.ecoBtn?.addEventListener('click', () => {
       this.ecoEnabled = !this.ecoEnabled;
-      ecoBtn.classList.toggle('active', this.ecoEnabled);
+      this.syncQualityAndEcoButtons();
       this.bus.emit('eco:toggle', { enabled: this.ecoEnabled });
     });
 
@@ -195,15 +223,26 @@ export class HudController {
     hideBtn?.addEventListener('click', () => this.toggleHud());
 
     this.pomoToggleBtn?.addEventListener('click', () => {
-      this.pomoRunning = !this.pomoRunning;
+      if (this.pomoRunning) {
+        if (this.pomoEndTimeMs !== null) {
+          this.pomoSecondsLeft = Math.max(1, Math.ceil((this.pomoEndTimeMs - Date.now()) / 1000));
+        }
+        this.pomoEndTimeMs = null;
+        this.pomoRunning = false;
+      } else {
+        this.pomoEndTimeMs = Date.now() + this.pomoSecondsLeft * 1000;
+        this.pomoRunning = true;
+      }
       if (this.pomoToggleBtn) {
         this.pomoToggleBtn.textContent = this.pomoRunning ? '⏸' : '▶';
       }
+      this.updatePomodoroDisplay();
     });
 
     const resetBtn = this.root.querySelector<HTMLButtonElement>('#pomo-reset');
     resetBtn?.addEventListener('click', () => {
       this.pomoRunning = false;
+      this.pomoEndTimeMs = null;
       this.pomoMode = 'focus';
       this.pomoSecondsLeft = 25 * 60;
       if (this.pomoToggleBtn) this.pomoToggleBtn.textContent = '▶';
@@ -220,15 +259,28 @@ export class HudController {
     });
   }
 
+  private syncQualityAndEcoButtons(): void {
+    if (this.qualityBtn) {
+      this.qualityBtn.textContent = `Quality: ${this.qualityTier[0].toUpperCase()}${this.qualityTier.slice(1)}`;
+    }
+    if (this.ecoBtn) {
+      this.ecoBtn.classList.toggle('active', this.ecoEnabled);
+    }
+  }
+
   private tickPomodoro(): void {
-    if (!this.pomoRunning) return;
-    this.pomoSecondsLeft -= 1;
-    if (this.pomoSecondsLeft <= 0) {
+    if (!this.pomoRunning || this.pomoEndTimeMs === null) return;
+    const remaining = Math.ceil((this.pomoEndTimeMs - Date.now()) / 1000);
+    if (remaining <= 0) {
       this.pomoMode = this.pomoMode === 'focus' ? 'break' : 'focus';
       this.pomoSecondsLeft = (this.pomoMode === 'focus' ? 25 : 5) * 60;
+      this.pomoEndTimeMs = Date.now() + this.pomoSecondsLeft * 1000;
+      this.bus.emit('pomodoro:complete', { nextMode: this.pomoMode });
       this.showToast(
         this.pomoMode === 'break' ? 'Focus session complete — take a 5m break' : 'Break finished — back to focus',
       );
+    } else {
+      this.pomoSecondsLeft = remaining;
     }
     this.updatePomodoroDisplay();
   }
@@ -258,6 +310,7 @@ export class HudController {
 
   dispose(): void {
     window.removeEventListener('keydown', this.onKeyDownBound);
+    document.removeEventListener('visibilitychange', this.onVisibilityBound);
     if (this.pomoTimerId !== null) {
       window.clearInterval(this.pomoTimerId);
       this.pomoTimerId = null;

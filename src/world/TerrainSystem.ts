@@ -25,7 +25,7 @@ export class TerrainSystem implements IWorldSystem {
     this.scene = scene;
     this.biome = biome;
     this.assets = assets;
-    this.heightfield = new TerrainHeightfield(biome.terrain, biome.seed);
+    this.heightfield = new TerrainHeightfield(biome.terrain, biome.seed, biome.landmarks);
   }
 
   init(): void {
